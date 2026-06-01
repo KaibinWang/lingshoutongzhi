@@ -1,0 +1,4 @@
+群名称,Webhook地址,分类
+分行综合群,https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=your-key-here,分行群
+分行视频群,https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=your-key-here,分行群
+零售第一战略群,https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=your-key-here,战略群
