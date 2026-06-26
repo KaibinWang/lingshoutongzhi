@@ -89,6 +89,19 @@ class GroupConfig:
                 return True
         return False
 
+    def delete_groups(self, group_ids: List[int]) -> int:
+        """批量删除群组，返回实际删除数量。"""
+        ids_to_delete = set(group_ids)
+        if not ids_to_delete:
+            return 0
+
+        original_count = len(self.groups)
+        self.groups = [group for group in self.groups if group.get("id") not in ids_to_delete]
+        deleted_count = original_count - len(self.groups)
+        if deleted_count:
+            self.save()
+        return deleted_count
+
     def get_group(self, group_id: int) -> Optional[Dict]:
         """获取单个群组"""
         for group in self.groups:

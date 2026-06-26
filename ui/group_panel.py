@@ -118,6 +118,10 @@ class GroupPanel(QWidget):
         self.delete_btn.clicked.connect(self.delete_group)
         toolbar.addWidget(self.delete_btn)
 
+        self.batch_delete_btn = QPushButton("🗑️ 批量删除选中")
+        self.batch_delete_btn.clicked.connect(self.delete_selected_groups)
+        toolbar.addWidget(self.batch_delete_btn)
+
         toolbar.addStretch()
 
         self.import_csv_btn = QPushButton("📥 导入CSV")
@@ -158,7 +162,7 @@ class GroupPanel(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.doubleClicked.connect(self.edit_group)
 
@@ -309,6 +313,42 @@ class GroupPanel(QWidget):
         if reply == QMessageBox.Yes:
             self.config.delete_group(group_id)
             self.refresh_table()
+
+    def delete_selected_groups(self):
+        """批量删除表格中选中的群组。"""
+        selected_rows = self.table.selectionModel().selectedRows()
+        if not selected_rows:
+            QMessageBox.information(self, "提示", "请先选中要删除的群组（可按 Ctrl 或 Shift 多选）")
+            return
+
+        group_ids = []
+        group_names = []
+        for model_index in selected_rows:
+            group_id_item = self.table.item(model_index.row(), 4)
+            group_name_item = self.table.item(model_index.row(), 1)
+            if group_id_item is not None:
+                group_ids.append(int(group_id_item.text()))
+                group_names.append(group_name_item.text() if group_name_item else "未命名群组")
+
+        if not group_ids:
+            return
+
+        preview = "、".join(group_names[:5])
+        if len(group_names) > 5:
+            preview += f" 等 {len(group_names)} 个群组"
+
+        reply = QMessageBox.question(
+            self,
+            "确认批量删除",
+            f"确定要删除选中的 {len(group_ids)} 个群组吗？\n\n{preview}\n\n此操作无法撤销。",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        deleted_count = self.config.delete_groups(group_ids)
+        self.refresh_table()
+        QMessageBox.information(self, "删除完成", f"已删除 {deleted_count} 个群组")
 
     def import_csv(self):
         """从CSV导入"""

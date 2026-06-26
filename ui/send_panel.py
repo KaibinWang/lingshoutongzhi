@@ -3,17 +3,72 @@
 配置发送参数、选择目标群组、控制发送流程
 """
 
+import re
+from pathlib import Path
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QSpinBox, QCheckBox, QProgressBar, QGroupBox, QListWidget,
     QListWidgetItem, QAbstractItemView, QMessageBox, QSplitter,
-    QTextEdit, QFrame
+    QTextEdit, QFrame, QDialog, QFormLayout, QLineEdit,
+    QDialogButtonBox, QComboBox
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QFont, QColor
+from PyQt5.QtGui import QFont, QColor, QTextCursor
 
 from core.config import GroupConfig
 from core.sender import WebhookSender, SendResult, SendLog
+
+
+class VariableDialog(QDialog):
+    """变量填写对话框"""
+
+    # 常见变量的中文说明
+    VAR_LABELS = {
+        "{topic}": "会议主题",
+        "{time}": "会议时间",
+        "{location}": "会议地点",
+        "{attendees}": "参会人员",
+        "{notes}": "备注",
+        "{content}": "通知内容",
+        "{date}": "日期",
+        "{title}": "标题",
+    }
+
+    def __init__(self, variables: list, parent=None):
+        super().__init__(parent)
+        self.variables = variables
+        self.inputs = {}
+        self.init_ui()
+
+    def init_ui(self):
+        self.setWindowTitle("填写模板变量")
+        self.setMinimumWidth(450)
+
+        layout = QVBoxLayout(self)
+
+        tip = QLabel("检测到消息中包含以下变量，请填写对应内容：")
+        tip.setStyleSheet("color: #666; padding: 5px;")
+        layout.addWidget(tip)
+
+        form_layout = QFormLayout()
+
+        for var in self.variables:
+            label = self.VAR_LABELS.get(var, var)
+            line_edit = QLineEdit()
+            line_edit.setPlaceholderText(f"请输入{label}")
+            form_layout.addRow(f"{label} ({var}):", line_edit)
+            self.inputs[var] = line_edit
+
+        layout.addLayout(form_layout)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def get_values(self) -> dict:
+        """获取用户填写的变量值"""
+        return {var: edit.text() for var, edit in self.inputs.items()}
 
 
 class SendThread(QThread):
@@ -22,16 +77,19 @@ class SendThread(QThread):
     result = pyqtSignal(object)  # SendResult
     finished = pyqtSignal(list)  # List[SendResult]
 
-    def __init__(self, sender: WebhookSender, groups: list, content: str):
+    def __init__(self, sender: WebhookSender, groups: list, content: str,
+                 attachment_paths: list = None):
         super().__init__()
         self.sender = sender
         self.groups = groups
         self.content = content
+        self.attachment_paths = attachment_paths or []
 
     def run(self):
         results = self.sender.send_to_groups(
             self.groups,
             self.content,
+            self.attachment_paths,
             progress_callback=lambda c, t, n: self.progress.emit(c, t, n),
             result_callback=lambda r: self.result.emit(r)
         )
@@ -48,6 +106,8 @@ class SendPanel(QWidget):
         self.send_log = SendLog()
         self.send_thread = None
         self.is_sending = False
+        self.current_content = ""
+        self.current_attachment_paths = []
         self.init_ui()
 
     def init_ui(self):
@@ -86,6 +146,11 @@ class SendPanel(QWidget):
         group_header = QHBoxLayout()
         group_header.addWidget(QLabel("📋 目标群组:"))
 
+        group_header.addWidget(QLabel("分类:"))
+        self.category_filter = QComboBox()
+        self.category_filter.currentIndexChanged.connect(self.filter_group_list)
+        group_header.addWidget(self.category_filter)
+
         self.select_all_btn = QPushButton("全选")
         self.select_all_btn.clicked.connect(self.select_all)
         group_header.addWidget(self.select_all_btn)
@@ -103,6 +168,7 @@ class SendPanel(QWidget):
         # 群组列表（带复选框）
         self.group_list = QListWidget()
         self.group_list.setSelectionMode(QAbstractItemView.NoSelection)
+        self.group_list.itemChanged.connect(self.update_selection_count)
         left_layout.addWidget(self.group_list)
 
         # 选中数量统计
@@ -179,6 +245,10 @@ class SendPanel(QWidget):
         log_header.addWidget(QLabel("📝 发送日志:"))
         log_header.addStretch()
 
+        self.history_btn = QPushButton("📋 历史记录")
+        self.history_btn.clicked.connect(self.show_history)
+        log_header.addWidget(self.history_btn)
+
         self.clear_log_btn = QPushButton("清空")
         self.clear_log_btn.clicked.connect(self.clear_log)
         log_header.addWidget(self.clear_log_btn)
@@ -205,6 +275,15 @@ class SendPanel(QWidget):
 
     def refresh_group_list(self):
         """刷新群组列表"""
+        selected_category = self.category_filter.currentText()
+        self.category_filter.blockSignals(True)
+        self.category_filter.clear()
+        self.category_filter.addItem("全部分类")
+        self.category_filter.addItems(self.group_config.get_categories())
+        category_index = self.category_filter.findText(selected_category)
+        self.category_filter.setCurrentIndex(category_index if category_index >= 0 else 0)
+        self.category_filter.blockSignals(False)
+
         self.group_list.clear()
         groups = self.group_config.groups
 
@@ -221,28 +300,43 @@ class SendPanel(QWidget):
             item.setData(Qt.UserRole, group)
             self.group_list.addItem(item)
 
+        self.filter_group_list()
         self.update_selection_count()
 
-        # 连接信号
-        self.group_list.itemChanged.connect(self.update_selection_count)
+    def filter_group_list(self):
+        """按选择的分类过滤目标群组。"""
+        selected_category = self.category_filter.currentText()
+        for i in range(self.group_list.count()):
+            item = self.group_list.item(i)
+            group = item.data(Qt.UserRole)
+            matches_category = (
+                selected_category == "全部分类"
+                or group.get("category", "默认") == selected_category
+            )
+            item.setHidden(not matches_category)
+        self.update_selection_count()
 
     def select_all(self):
         """全选"""
         for i in range(self.group_list.count()):
             item = self.group_list.item(i)
-            item.setCheckState(Qt.Checked)
+            if not item.isHidden():
+                item.setCheckState(Qt.Checked)
 
     def deselect_all(self):
         """全不选"""
         for i in range(self.group_list.count()):
             item = self.group_list.item(i)
-            item.setCheckState(Qt.Unchecked)
+            if not item.isHidden():
+                item.setCheckState(Qt.Unchecked)
 
     def update_selection_count(self):
         """更新选中数量"""
-        total = self.group_list.count()
+        total = sum(1 for i in range(self.group_list.count())
+                    if not self.group_list.item(i).isHidden())
         selected = sum(1 for i in range(self.group_list.count())
-                      if self.group_list.item(i).checkState() == Qt.Checked)
+                      if not self.group_list.item(i).isHidden()
+                      and self.group_list.item(i).checkState() == Qt.Checked)
         self.selection_label.setText(f"已选: {selected}/{total}")
 
     def get_selected_groups(self) -> list:
@@ -250,7 +344,7 @@ class SendPanel(QWidget):
         groups = []
         for i in range(self.group_list.count()):
             item = self.group_list.item(i)
-            if item.checkState() == Qt.Checked:
+            if not item.isHidden() and item.checkState() == Qt.Checked:
                 group = item.data(Qt.UserRole)
                 groups.append(group)
         return groups
@@ -259,9 +353,34 @@ class SendPanel(QWidget):
         """开始发送"""
         # 获取消息内容
         content = self.get_message_content()
-        if not content:
-            QMessageBox.warning(self, "提示", "请先在通知编辑页面输入消息内容")
+        attachment_paths = self.get_attachment_paths()
+        if not content and not attachment_paths:
+            QMessageBox.warning(self, "提示", "请先输入消息内容或选择至少一个附件")
             return
+
+        for attachment_path in attachment_paths:
+            attachment = Path(attachment_path)
+            if not attachment.is_file():
+                QMessageBox.warning(self, "附件不可用", f"找不到附件：\n{attachment_path}")
+                return
+            if attachment.stat().st_size > WebhookSender.MAX_ATTACHMENT_SIZE:
+                QMessageBox.warning(
+                    self, "附件过大", f"{attachment.name} 超过企业微信机器人 20 MB 的附件限制。"
+                )
+                return
+
+        # 检测消息中的变量
+        variables = re.findall(r'\{[a-zA-Z_]+\}', content)
+        variables = list(set(variables))  # 去重
+
+        if variables:
+            dialog = VariableDialog(variables, self)
+            if dialog.exec_() != QDialog.Accepted:
+                return
+            # 替换变量
+            values = dialog.get_values()
+            for var, value in values.items():
+                content = content.replace(var, value)
 
         # 获取选中的群组
         groups = self.get_selected_groups()
@@ -270,10 +389,14 @@ class SendPanel(QWidget):
             return
 
         # 确认发送
+        message_count = (1 if content else 0) + len(attachment_paths)
+        attachment_tip = ""
+        if attachment_paths:
+            attachment_tip = f"\n附件：{len(attachment_paths)} 个（每个群将额外发送 {len(attachment_paths)} 条文件消息）"
         reply = QMessageBox.question(
             self, "确认发送",
-            f"确定要向 {len(groups)} 个群组发送消息吗？\n\n"
-            f"预计耗时: {len(groups) * self.interval_spin.value()} 秒",
+            f"确定要向 {len(groups)} 个群组发送通知吗？{attachment_tip}\n\n"
+            f"预计耗时: {len(groups) * self.interval_spin.value() * message_count} 秒",
             QMessageBox.Yes | QMessageBox.No
         )
 
@@ -294,9 +417,11 @@ class SendPanel(QWidget):
         self.stop_btn.setEnabled(True)
         self.progress_bar.setMaximum(len(groups))
         self.progress_bar.setValue(0)
+        self.current_content = content
+        self.current_attachment_paths = attachment_paths
 
         # 启动发送线程
-        self.send_thread = SendThread(self.sender, groups, content)
+        self.send_thread = SendThread(self.sender, groups, content, attachment_paths)
         self.send_thread.progress.connect(self.on_progress)
         self.send_thread.result.connect(self.on_result)
         self.send_thread.finished.connect(self.on_finished)
@@ -340,6 +465,10 @@ class SendPanel(QWidget):
             f"失败: {stats['failed']}"
         )
 
+        # 保存到历史记录
+        attachment_names = [Path(path).name for path in self.current_attachment_paths]
+        self.send_log.save_to_history(self.current_content, stats, attachment_names)
+
         QMessageBox.information(
             self, "发送完成",
             f"消息发送完成\n\n"
@@ -372,6 +501,185 @@ class SendPanel(QWidget):
                 f.write(content)
             QMessageBox.information(self, "导出成功", f"日志已导出到:\n{file_path}")
 
+    def show_history(self):
+        """显示历史记录对话框"""
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QDialogButtonBox
+
+        history = self.send_log.get_history()
+        if not history:
+            QMessageBox.information(self, "提示", "暂无发送历史记录")
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("发送历史记录")
+        dialog.setMinimumSize(700, 500)
+
+        layout = QVBoxLayout(dialog)
+
+        # 历史记录显示
+        text_edit = QTextEdit()
+        text_edit.setReadOnly(True)
+        text_edit.setFont(QFont("Consolas", 10))
+
+        # 构建历史记录文本
+        lines = []
+        for record in reversed(history):  # 最新的在前面
+            lines.append(f"{'='*50}")
+            lines.append(f"发送时间: {record['datetime']}")
+            lines.append(f"消息内容: {record['content']}")
+            attachments = record.get("attachments", [])
+            if attachments:
+                lines.append(f"附件: {', '.join(attachments)}")
+            lines.append(f"发送结果: 总计 {record['total']} | 成功 {record['success']} | 失败 {record['failed']}")
+            lines.append(f"{'-'*40}")
+
+            for detail in record.get("details", []):
+                status = "✓" if detail["success"] else "✗"
+                lines.append(f"  [{detail['timestamp']}] {status} {detail['group_name']} - {detail['message']}")
+
+            lines.append("")
+
+        text_edit.setPlainText("\n".join(lines))
+        layout.addWidget(text_edit)
+
+        # 撤回/作废说明区域
+        recall_layout = QHBoxLayout()
+        recall_layout.addWidget(QLabel("选择要作废的记录:"))
+
+        recall_combo = QComboBox()
+        record_map = {}
+        for record in reversed(history):
+            record_id = record.get("id")
+            attachments = record.get("attachments", [])
+            attachment_text = f" / 附件 {len(attachments)} 个" if attachments else ""
+            combo_text = (
+                f"#{record_id} {record.get('datetime', '')} "
+                f"成功 {record.get('success', 0)}/{record.get('total', 0)}{attachment_text}"
+            )
+            recall_combo.addItem(combo_text, record_id)
+            record_map[record_id] = record
+
+        recall_layout.addWidget(recall_combo)
+
+        recall_btn = QPushButton("发送撤回/作废通知")
+        recall_btn.setToolTip("企业微信机器人不支持真正撤回；这里会给本次成功发送的群补发一条作废说明。")
+        recall_btn.clicked.connect(
+            lambda: self.send_void_notice(record_map.get(recall_combo.currentData()))
+        )
+        recall_layout.addWidget(recall_btn)
+        layout.addLayout(recall_layout)
+
+        # 按钮区域
+        btn_layout = QHBoxLayout()
+
+        export_btn = QPushButton("导出全部历史")
+        export_btn.clicked.connect(lambda: self.export_history())
+        btn_layout.addWidget(export_btn)
+
+        clear_btn = QPushButton("清空历史")
+        clear_btn.clicked.connect(lambda: self.clear_history(dialog))
+        btn_layout.addWidget(clear_btn)
+
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(dialog.close)
+        btn_layout.addWidget(close_btn)
+
+        layout.addLayout(btn_layout)
+
+        dialog.exec_()
+
+    def send_void_notice(self, record: dict):
+        """针对某次历史记录，给成功发送的群补发一条撤回/作废说明。"""
+        if not record:
+            QMessageBox.warning(self, "提示", "请先选择一条历史记录")
+            return
+
+        successful_groups = []
+        for detail in record.get("details", []):
+            webhook = detail.get("webhook", "")
+            if detail.get("success") and webhook:
+                successful_groups.append({
+                    "id": detail.get("group_id"),
+                    "name": detail.get("group_name", "未知群组"),
+                    "category": detail.get("category", "默认"),
+                    "webhook": webhook,
+                })
+
+        if not successful_groups:
+            QMessageBox.warning(
+                self,
+                "无法发送作废通知",
+                "这条历史记录里没有可用的 webhook。\n\n"
+                "旧版本历史记录只保存了群名，没有保存 webhook，无法自动补发；"
+                "从当前版本重新发送后的历史记录可以使用这个功能。"
+            )
+            return
+
+        attachments = record.get("attachments", [])
+        attachment_line = f"\n附件：{', '.join(attachments)}" if attachments else ""
+        original_content = record.get("content", "")
+        if len(original_content) > 120:
+            original_content = original_content[:120] + "..."
+
+        void_content = (
+            "<font color=\"warning\">【撤回/作废通知】</font>\n\n"
+            "刚才发送的通知及附件已作废，请忽略上一条内容。"
+            f"\n\n原发送时间：{record.get('datetime', '')}"
+            f"{attachment_line}"
+            f"\n原通知摘要：{original_content}"
+        )
+
+        reply = QMessageBox.question(
+            self,
+            "确认发送作废通知",
+            f"企业微信机器人无法真正撤回已发送消息/附件。\n\n"
+            f"是否向本次成功发送的 {len(successful_groups)} 个群补发“作废通知”？",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        self.sender.interval = self.interval_spin.value()
+        self.sender.retries = self.retries_spin.value()
+        results = self.sender.send_to_groups(successful_groups, void_content)
+
+        success = sum(1 for result in results if result.success)
+        failed = len(results) - success
+        QMessageBox.information(
+            self,
+            "作废通知发送完成",
+            f"已发送作废通知。\n\n成功：{success} 个群\n失败：{failed} 个群"
+        )
+
+    def export_history(self):
+        """导出历史记录"""
+        from PyQt5.QtWidgets import QFileDialog
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "导出历史记录", "发送历史记录.txt",
+            "文本文件 (*.txt);;所有文件 (*)"
+        )
+
+        if file_path:
+            content = self.send_log.export_history_to_text()
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            QMessageBox.information(self, "导出成功", f"历史记录已导出到:\n{file_path}")
+
+    def clear_history(self, dialog=None):
+        """清空历史记录"""
+        reply = QMessageBox.question(
+            self, "确认清空",
+            "确定要清空所有发送历史记录吗？",
+            QMessageBox.Yes | QMessageBox.No
+        )
+
+        if reply == QMessageBox.Yes:
+            self.send_log.clear_history()
+            QMessageBox.information(self, "清空成功", "历史记录已清空")
+            if dialog:
+                dialog.close()
+
     def get_message_content(self) -> str:
         """获取消息内容（从父窗口的消息编辑面板）"""
         # 向上遍历找到主窗口
@@ -381,3 +689,12 @@ class SendPanel(QWidget):
                 return parent.msg_editor.get_content()
             parent = parent.parent()
         return ""
+
+    def get_attachment_paths(self) -> list:
+        """获取通知编辑页中选择的附件路径。"""
+        parent = self.parent()
+        while parent:
+            if hasattr(parent, 'msg_editor'):
+                return parent.msg_editor.get_attachment_paths()
+            parent = parent.parent()
+        return []

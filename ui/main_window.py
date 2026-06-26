@@ -3,9 +3,11 @@
 整合各个面板，提供主界面
 """
 
+import csv
+
 from PyQt5.QtWidgets import (
     QMainWindow, QTabWidget, QWidget, QVBoxLayout,
-    QLabel, QStatusBar, QMessageBox, QAction, QMenuBar
+    QLabel, QStatusBar, QMessageBox, QAction, QMenuBar, QFileDialog
 )
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont, QIcon
@@ -30,11 +32,8 @@ class MainWindow(QMainWindow):
 
     def init_ui(self):
         """初始化界面"""
-        self.setWindowTitle("零售通知自动分发工具")
+        self.setWindowTitle("零售通知自动分发工具 · 附件版")
         self.setMinimumSize(900, 650)
-
-        # 创建菜单栏
-        self.create_menu_bar()
 
         # 创建中心部件
         central_widget = QWidget()
@@ -61,6 +60,9 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(self.tab_widget)
 
+        # 创建菜单栏（需要在面板初始化之后，因为菜单项引用了面板的方法）
+        self.create_menu_bar()
+
         # 状态栏
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
@@ -75,6 +77,12 @@ class MainWindow(QMainWindow):
 
         # 文件菜单
         file_menu = menubar.addMenu("文件(&F)")
+
+        template_action = QAction("下载群组导入模板", self)
+        template_action.triggered.connect(self.download_group_import_template)
+        file_menu.addAction(template_action)
+
+        file_menu.addSeparator()
 
         import_csv_action = QAction("导入群组(CSV)", self)
         import_csv_action.triggered.connect(self.group_panel.import_csv)
@@ -113,6 +121,37 @@ class MainWindow(QMainWindow):
         usage_action = QAction("使用说明", self)
         usage_action.triggered.connect(self.show_usage)
         help_menu.addAction(usage_action)
+
+    def download_group_import_template(self):
+        """保存可用于批量导入群组的 CSV 模板。"""
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "保存群组导入模板",
+            "群组导入模板.csv",
+            "CSV 文件 (*.csv)",
+        )
+        if not file_path:
+            return
+        if not file_path.lower().endswith(".csv"):
+            file_path += ".csv"
+
+        try:
+            with open(file_path, "w", encoding="utf-8-sig", newline="") as template_file:
+                writer = csv.writer(template_file)
+                writer.writerow(["群名称", "Webhook地址", "分类"])
+                writer.writerow([
+                    "示例群组",
+                    "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=请替换为真实Key",
+                    "默认",
+                ])
+            QMessageBox.information(
+                self,
+                "模板已保存",
+                f"群组导入模板已保存到：\n{file_path}\n\n"
+                "请将示例行替换为实际群组信息后，再通过“导入群组(CSV)”导入。",
+            )
+        except OSError as error:
+            QMessageBox.warning(self, "保存失败", f"无法保存导入模板：\n{error}")
 
     def update_status_bar(self):
         """更新状态栏"""

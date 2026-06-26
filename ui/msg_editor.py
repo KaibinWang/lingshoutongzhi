@@ -7,7 +7,8 @@ from datetime import datetime
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QPushButton,
     QLabel, QComboBox, QLineEdit, QDialog, QFormLayout,
-    QDialogButtonBox, QMessageBox, QGroupBox, QSplitter, QFrame
+    QDialogButtonBox, QMessageBox, QGroupBox, QSplitter, QFrame,
+    QFileDialog
 )
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont, QTextCursor
@@ -77,6 +78,7 @@ class MsgEditorPanel(QWidget):
     def __init__(self, template_config: TemplateConfig, parent=None):
         super().__init__(parent)
         self.template_config = template_config
+        self.attachment_paths = []
         self.init_ui()
         self.load_template_list()
 
@@ -105,6 +107,26 @@ class MsgEditorPanel(QWidget):
         template_layout.addWidget(self.delete_template_btn)
 
         layout.addWidget(template_group)
+
+        # 附件选择区域。企业微信会把正文和每个附件分别发送为独立消息。
+        attachment_group = QGroupBox("通知附件")
+        attachment_layout = QHBoxLayout(attachment_group)
+        attachment_layout.addWidget(QLabel("已选附件:"))
+
+        self.attachment_label = QLabel("未选择附件")
+        self.attachment_label.setStyleSheet("color: #666;")
+        self.attachment_label.setToolTip("每个附件最大 20 MB")
+        attachment_layout.addWidget(self.attachment_label, 1)
+
+        self.select_attachment_btn = QPushButton("📎 选择附件")
+        self.select_attachment_btn.clicked.connect(self.select_attachments)
+        attachment_layout.addWidget(self.select_attachment_btn)
+
+        self.clear_attachment_btn = QPushButton("清除附件")
+        self.clear_attachment_btn.clicked.connect(self.clear_attachments)
+        self.clear_attachment_btn.setEnabled(False)
+        attachment_layout.addWidget(self.clear_attachment_btn)
+        layout.addWidget(attachment_group)
 
         # 使用分割器，上方编辑，下方预览
         splitter = QSplitter(Qt.Vertical)
@@ -237,6 +259,20 @@ class MsgEditorPanel(QWidget):
         import re
         html = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', html)
 
+        # 企业微信 Markdown 使用 info / warning / comment 作为语义颜色；
+        # Qt 富文本只接受标准颜色名称或十六进制颜色，因此仅在预览中转换。
+        wecom_colors = {
+            "info": "#0066CC",
+            "warning": "#D97706",
+            "comment": "#666666",
+        }
+        html = re.sub(
+            r'color=(["\'])(info|warning|comment)\1',
+            lambda match: f'color="{wecom_colors[match.group(2).lower()]}"',
+            html,
+            flags=re.IGNORECASE,
+        )
+
         # 处理引用
         lines = html.split('\n')
         processed_lines = []
@@ -255,6 +291,43 @@ class MsgEditorPanel(QWidget):
     def get_content(self) -> str:
         """获取编辑的消息内容"""
         return self.content_edit.toPlainText()
+
+    def select_attachments(self):
+        """选择要随通知发送的一个或多个附件。"""
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "选择附件（每个文件不超过 20 MB）",
+            "",
+            "所有文件 (*.*)",
+        )
+        if paths:
+            self.attachment_paths = paths
+            self._update_attachment_label()
+
+    def clear_attachments(self):
+        """清除当前选择的附件。"""
+        self.attachment_paths = []
+        self._update_attachment_label()
+
+    def _update_attachment_label(self):
+        """更新附件摘要显示。"""
+        count = len(self.attachment_paths)
+        if count == 0:
+            self.attachment_label.setText("未选择附件")
+            self.attachment_label.setToolTip("每个附件最大 20 MB")
+        elif count == 1:
+            name = self.attachment_paths[0].replace("\\", "/").split("/")[-1]
+            self.attachment_label.setText(name)
+            self.attachment_label.setToolTip(self.attachment_paths[0])
+        else:
+            names = [path.replace("\\", "/").split("/")[-1] for path in self.attachment_paths]
+            self.attachment_label.setText(f"已选择 {count} 个附件")
+            self.attachment_label.setToolTip("\n".join(names))
+        self.clear_attachment_btn.setEnabled(count > 0)
+
+    def get_attachment_paths(self) -> list:
+        """返回当前选择的附件路径。"""
+        return self.attachment_paths.copy()
 
     def set_content(self, content: str):
         """设置消息内容"""
