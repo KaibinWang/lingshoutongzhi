@@ -108,14 +108,14 @@ class MsgEditorPanel(QWidget):
 
         layout.addWidget(template_group)
 
-        # 附件选择区域。企业微信会把正文和每个附件分别发送为独立消息。
+        # 附件选择区域。JPG/PNG 会作为图片消息预览，其他文件作为附件消息。
         attachment_group = QGroupBox("通知附件")
         attachment_layout = QHBoxLayout(attachment_group)
         attachment_layout.addWidget(QLabel("已选附件:"))
 
         self.attachment_label = QLabel("未选择附件")
         self.attachment_label.setStyleSheet("color: #666;")
-        self.attachment_label.setToolTip("每个附件最大 20 MB")
+        self.attachment_label.setToolTip("JPG/PNG 图片最大 2 MB，可直接预览；其他附件最大 20 MB")
         attachment_layout.addWidget(self.attachment_label, 1)
 
         self.select_attachment_btn = QPushButton("📎 选择附件")
@@ -296,9 +296,9 @@ class MsgEditorPanel(QWidget):
         """选择要随通知发送的一个或多个附件。"""
         paths, _ = QFileDialog.getOpenFileNames(
             self,
-            "选择附件（每个文件不超过 20 MB）",
+            "选择附件或图片（JPG/PNG 图片不超过 2 MB）",
             "",
-            "所有文件 (*.*)",
+            "常用文件 (*.jpg *.jpeg *.png *.pdf *.doc *.docx *.xls *.xlsx *.csv *.txt);;所有文件 (*.*)",
         )
         if paths:
             self.attachment_paths = paths
@@ -314,7 +314,7 @@ class MsgEditorPanel(QWidget):
         count = len(self.attachment_paths)
         if count == 0:
             self.attachment_label.setText("未选择附件")
-            self.attachment_label.setToolTip("每个附件最大 20 MB")
+            self.attachment_label.setToolTip("JPG/PNG 图片最大 2 MB，可直接预览；其他附件最大 20 MB")
         elif count == 1:
             name = self.attachment_paths[0].replace("\\", "/").split("/")[-1]
             self.attachment_label.setText(name)

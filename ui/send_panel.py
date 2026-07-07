@@ -363,6 +363,16 @@ class SendPanel(QWidget):
             if not attachment.is_file():
                 QMessageBox.warning(self, "附件不可用", f"找不到附件：\n{attachment_path}")
                 return
+            if WebhookSender.is_preview_image(attachment_path):
+                if attachment.stat().st_size > WebhookSender.MAX_IMAGE_SIZE:
+                    QMessageBox.warning(
+                        self,
+                        "图片过大",
+                        f"{attachment.name} 超过企业微信机器人 2 MB 的图片直显限制。\n\n"
+                        "请压缩图片，或改用非 JPG/PNG 格式作为普通附件发送。"
+                    )
+                    return
+                continue
             if attachment.stat().st_size > WebhookSender.MAX_ATTACHMENT_SIZE:
                 QMessageBox.warning(
                     self, "附件过大", f"{attachment.name} 超过企业微信机器人 20 MB 的附件限制。"
@@ -392,7 +402,19 @@ class SendPanel(QWidget):
         message_count = (1 if content else 0) + len(attachment_paths)
         attachment_tip = ""
         if attachment_paths:
-            attachment_tip = f"\n附件：{len(attachment_paths)} 个（每个群将额外发送 {len(attachment_paths)} 条文件消息）"
+            preview_images = [
+                path for path in attachment_paths if WebhookSender.is_preview_image(path)
+            ]
+            files = len(attachment_paths) - len(preview_images)
+            detail_parts = []
+            if preview_images:
+                detail_parts.append(f"{len(preview_images)} 张图片将直接预览")
+            if files:
+                detail_parts.append(f"{files} 个文件将作为附件")
+            attachment_tip = (
+                f"\n附件：{len(attachment_paths)} 个（"
+                f"{'，'.join(detail_parts)}；每个群将额外发送 {len(attachment_paths)} 条消息）"
+            )
         reply = QMessageBox.question(
             self, "确认发送",
             f"确定要向 {len(groups)} 个群组发送通知吗？{attachment_tip}\n\n"

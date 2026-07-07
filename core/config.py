@@ -6,18 +6,25 @@
 import json
 import os
 import csv
+import sys
 from pathlib import Path
 from typing import List, Dict, Optional
 
 
-# 获取数据目录路径
-BASE_DIR = Path(__file__).parent.parent
+# 获取数据目录路径。打包后不写入程序包/临时解压目录，避免配置和日志无法持久保存。
+if getattr(sys, "frozen", False) and sys.platform == "darwin":
+    BASE_DIR = Path.home() / "Library" / "Application Support" / "零售通知工具"
+elif getattr(sys, "frozen", False) and sys.platform == "win32":
+    BASE_DIR = Path(os.getenv("APPDATA", Path.home())) / "零售通知工具"
+else:
+    BASE_DIR = Path(__file__).parent.parent
+
 DATA_DIR = BASE_DIR / "data"
 LOGS_DIR = BASE_DIR / "logs"
 
 # 确保目录存在
-DATA_DIR.mkdir(exist_ok=True)
-LOGS_DIR.mkdir(exist_ok=True)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 GROUPS_FILE = DATA_DIR / "groups.json"
 TEMPLATES_FILE = DATA_DIR / "templates.json"

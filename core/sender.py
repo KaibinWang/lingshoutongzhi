@@ -6,6 +6,8 @@ Webhook 发送模块
 import json
 import time
 import logging
+import base64
+import hashlib
 import requests
 from datetime import datetime
 from typing import Dict, List, Callable, Optional
@@ -55,6 +57,9 @@ class WebhookSender:
 
     # 企业微信机器人单个文件的限制为 20 MB。
     MAX_ATTACHMENT_SIZE = 20 * 1024 * 1024
+    # 企业微信机器人图片消息限制为 2 MB，支持 JPG/PNG。图片消息会在群里直接预览。
+    MAX_IMAGE_SIZE = 2 * 1024 * 1024
+    IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 
     def __init__(self, interval: float = 3.0, retries: int = 2, timeout: int = 10):
         """
@@ -191,6 +196,50 @@ class WebhookSender:
 
         return False, f"附件 {path.name} 重试次数已用完"
 
+    @classmethod
+    def is_preview_image(cls, file_path: str) -> bool:
+        """判断附件是否可作为企业微信图片消息直接预览。"""
+        return Path(file_path).suffix.lower() in cls.IMAGE_EXTENSIONS
+
+    def send_image(self, webhook_url: str, file_path: str) -> tuple:
+        """发送一张可在群内直接预览的图片消息。"""
+        path = Path(file_path)
+        if not path.is_file():
+            return False, f"图片不存在: {path.name}"
+        if path.stat().st_size > self.MAX_IMAGE_SIZE:
+            return False, f"图片超过 2 MB 直显限制: {path.name}"
+
+        for attempt in range(self.retries + 1):
+            try:
+                image_data = path.read_bytes()
+                if not image_data:
+                    return False, f"图片实际内容为空，请确认文件已下载完成: {path.name}"
+                if len(image_data) > self.MAX_IMAGE_SIZE:
+                    return False, f"图片超过 2 MB 直显限制: {path.name}"
+
+                payload = {
+                    "msgtype": "image",
+                    "image": {
+                        "base64": base64.b64encode(image_data).decode("ascii"),
+                        "md5": hashlib.md5(image_data).hexdigest(),
+                    },
+                }
+                response = requests.post(webhook_url, json=payload, timeout=self.timeout)
+                result = response.json()
+
+                if result.get("errcode") == 0:
+                    return True, f"图片发送成功: {path.name}"
+                raise RuntimeError(result.get("errmsg", "图片发送失败"))
+
+            except (OSError, ValueError, requests.RequestException, RuntimeError) as error:
+                if attempt < self.retries:
+                    logger.warning("图片发送失败，2 秒后重试: %s", error)
+                    time.sleep(2)
+                    continue
+                return False, f"图片 {path.name} 发送失败: {error}"
+
+        return False, f"图片 {path.name} 重试次数已用完"
+
     def send_notification(
         self, webhook_url: str, content: str, attachment_paths: Optional[List[str]] = None
     ) -> tuple:
@@ -204,7 +253,10 @@ class WebhookSender:
             success = success and text_success
 
         for attachment_path in attachment_paths or []:
-            file_success, file_message = self.send_file(webhook_url, attachment_path)
+            if self.is_preview_image(attachment_path):
+                file_success, file_message = self.send_image(webhook_url, attachment_path)
+            else:
+                file_success, file_message = self.send_file(webhook_url, attachment_path)
             messages.append(file_message)
             success = success and file_success
 
