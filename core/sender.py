@@ -27,18 +27,69 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# ── 失败阶段标签（个人发送逐条定位用）─────────────────────
+STAGE_LABELS = {
+    "search":     "查找联系人",
+    "verify":     "单位校验",
+    "enter_chat": "进入会话",
+    "send":       "粘贴发送",
+    "done":       "完成",
+}
+
+
 class SendResult:
     """发送结果"""
 
-    def __init__(self, group_name: str, success: bool, message: str, timestamp: str = None):
+    def __init__(self, group_name: str, success: bool, message: str, timestamp: str = None,
+                 unit: str = "", content: str = "",
+                 stage: str = "", detail: str = "", attempts: int = 1,
+                 screenshot: str = "", elapsed: float = 0.0):
         self.group_name = group_name
         self.success = success
         self.message = message
         self.timestamp = timestamp or datetime.now().strftime("%H:%M:%S")
+        self.unit = unit
+        self.content = content
+        # ── 失败定位字段（个人发送用；群组发送保持默认值）──
+        self.stage = stage              # 失败发生的阶段，见 STAGE_LABELS
+        self.detail = detail            # 人类可读的失败原因
+        self.attempts = attempts        # 实际尝试次数
+        self.screenshot = screenshot    # 失败截图路径（无则空）
+        self.elapsed = elapsed          # 该笔耗时（秒）
 
     def __str__(self):
         status = "✓" if self.success else "✗"
         return f"[{self.timestamp}] {status} {self.group_name} - {self.message}"
+
+
+def format_results(task: dict) -> List[str]:
+    """把任务里持久化的逐条结果渲染成人类可读的行（两个界面共用）。
+
+    Args:
+        task: 任务 dict，读取其 "results" 字段
+
+    Returns:
+        每行一条字符串：`✓ 姓名 [部门]` 或失败时附加阶段/备注/截图路径
+    """
+    lines: List[str] = []
+    for r in task.get("results") or []:
+        name = r.get("name", "")
+        unit = r.get("unit", "")
+        label = f"{name} [{unit}]" if unit else str(name)
+        if r.get("success"):
+            elapsed = r.get("elapsed") or 0
+            suffix = f"  耗时：{elapsed:.1f}s" if elapsed else ""
+            lines.append(f"✓ {label}{suffix}")
+        else:
+            stage = STAGE_LABELS.get(r.get("stage", ""), r.get("stage", "") or "未知阶段")
+            detail = r.get("detail") or r.get("message") or ""
+            attempts = r.get("attempts") or 1
+            line = f"✗ {label}  阶段：{stage}  备注：{detail}  重试：{max(0, attempts - 1)} 次"
+            shot = r.get("screenshot") or ""
+            if shot:
+                line += f"  📎截图：{shot}"
+            lines.append(line)
+    return lines
 
 
 class WebhookSender:
@@ -226,6 +277,31 @@ class SendLog:
         with open(self.HISTORY_FILE, "w", encoding="utf-8") as f:
             json.dump(self.history, f, ensure_ascii=False, indent=2)
 
+    def _append_to_csv(self, record: Dict):
+        """追加记录到CSV文件"""
+        import csv
+
+        csv_file = LOGS_DIR / "send_records.csv"
+        file_exists = csv_file.exists()
+
+        with open(csv_file, "a", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f)
+
+            # 如果文件不存在，写入表头
+            if not file_exists:
+                writer.writerow(["发送时间", "消息内容", "群组名称", "发送状态", "备注"])
+
+            # 写入每条发送记录
+            for detail in record.get("details", []):
+                status = "成功" if detail["success"] else "失败"
+                writer.writerow([
+                    record["datetime"],
+                    record["content"],
+                    detail["group_name"],
+                    status,
+                    detail["message"]
+                ])
+
     def add(self, result: SendResult, content: str = ""):
         """添加日志"""
         log_entry = {
@@ -252,6 +328,9 @@ class SendLog:
         }
         self.history.append(record)
         self._save_history()
+
+        # 自动写入CSV记录文件
+        self._append_to_csv(record)
 
     def get_logs(self) -> List[Dict]:
         """获取当前日志"""

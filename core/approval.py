@@ -119,6 +119,19 @@ class PendingTaskStore:
         self.save()
         return True
 
+    def update_results(self, task_id: int, results: List[Dict]) -> bool:
+        """把逐条发送结果写进任务（供事后查看失败明细与截图）。
+
+        只在任务结束时一次性写，避免每条结果都全量重写 pending_tasks.json；
+        崩溃续发仍靠 sent_targets / remaining_targets。
+        """
+        task = self.get(task_id)
+        if task is None:
+            return False
+        task["results"] = results
+        self.save()
+        return True
+
     def remove(self, task_id: int) -> bool:
         """删除任务（队列清理用）"""
         for i, t in enumerate(self.tasks):

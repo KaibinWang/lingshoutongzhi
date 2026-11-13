@@ -11,6 +11,7 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont, QIcon
 
 from core.config import GroupConfig, TemplateConfig
+from core.version import APP_NAME, APP_VERSION, VERSION_DISPLAY
 from ui.group_panel import GroupPanel
 from ui.msg_editor import MsgEditorPanel
 from ui.send_panel import SendPanel
@@ -31,7 +32,7 @@ class MainWindow(QMainWindow):
 
     def init_ui(self):
         """初始化界面"""
-        self.setWindowTitle("零售通知自动分发工具")
+        self.setWindowTitle(VERSION_DISPLAY)
         self.setMinimumSize(900, 650)
 
         # 创建中心部件
@@ -165,8 +166,8 @@ class MainWindow(QMainWindow):
         """显示关于对话框"""
         QMessageBox.about(
             self, "关于",
-            "<h3>零售通知自动分发工具</h3>"
-            "<p>版本: 1.0.0</p>"
+            f"<h3>{APP_NAME}</h3>"
+            f"<p>版本: {APP_VERSION}</p>"
             "<p>通过企业微信群机器人Webhook，自动将通知消息发送到多个工作群。</p>"
             "<hr>"
             "<p><b>使用前准备:</b></p>"

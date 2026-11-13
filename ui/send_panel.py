@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import (
     QSpinBox, QCheckBox, QProgressBar, QGroupBox, QListWidget,
     QListWidgetItem, QAbstractItemView, QMessageBox, QSplitter,
     QTextEdit, QFrame, QDialog, QFormLayout, QLineEdit,
-    QDialogButtonBox
+    QDialogButtonBox, QTableWidget, QTableWidgetItem, QHeaderView
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QFont, QColor, QTextCursor
@@ -252,6 +252,33 @@ class SendPanel(QWidget):
         self.log_text.setFont(QFont("Consolas", 10))
         right_layout.addWidget(self.log_text)
 
+        # 我的任务区
+        task_group = QGroupBox("我的任务")
+        task_inner = QVBoxLayout(task_group)
+
+        task_btn_row = QHBoxLayout()
+        self.refresh_task_btn = QPushButton("刷新")
+        self.refresh_task_btn.clicked.connect(self.refresh_tasks)
+        task_btn_row.addWidget(self.refresh_task_btn)
+        task_btn_row.addStretch()
+        task_inner.addLayout(task_btn_row)
+
+        self.task_table = QTableWidget()
+        self.task_table.setColumnCount(5)
+        self.task_table.setHorizontalHeaderLabels(["ID", "类型", "状态", "提交时间", "结果"])
+        self.task_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.task_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        self.task_table.setColumnWidth(0, 40)
+        self.task_table.setColumnWidth(1, 50)
+        self.task_table.setColumnWidth(3, 130)
+        self.task_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.task_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.task_table.setAlternatingRowColors(True)
+        self.task_table.setMaximumHeight(180)
+        task_inner.addWidget(self.task_table)
+
+        right_layout.addWidget(task_group)
+
         splitter.addWidget(right_widget)
 
         # 设置分割比例
@@ -260,6 +287,7 @@ class SendPanel(QWidget):
 
         # 初始加载群组列表
         self.refresh_group_list()
+        self.refresh_tasks()
 
     def refresh_group_list(self):
         """刷新群组列表"""
@@ -377,6 +405,9 @@ class SendPanel(QWidget):
             f"任务已提交审批（编号 #{task['id']}）。\n"
             "审批人通过后才会真实发送。"
         )
+
+        # 刷新任务列表
+        self.refresh_tasks()
 
 
     def stop_send(self):
@@ -548,3 +579,41 @@ class SendPanel(QWidget):
                 return parent.msg_editor.get_content()
             parent = parent.parent()
         return ""
+
+    def refresh_tasks(self):
+        """刷新我的任务列表"""
+        from core.approval import PendingTaskStore
+        from PyQt5.QtGui import QColor
+
+        STATUS_LABELS = {
+            "pending": "待审批",
+            "approved": "已通过",
+            "sending": "发送中",
+            "done": "已完成",
+            "failed": "失败",
+            "rejected": "已驳回",
+        }
+
+        store = PendingTaskStore()
+        tasks = store.list()
+
+        self.task_table.setRowCount(len(tasks))
+        for i, task in enumerate(tasks):
+            self.task_table.setItem(i, 0, QTableWidgetItem(str(task.get("id", ""))))
+            self.task_table.setItem(i, 1, QTableWidgetItem("个人" if task.get("type") == "personal" else "群组"))
+
+            status = task.get("status", "")
+            status_text = STATUS_LABELS.get(status, status)
+            status_item = QTableWidgetItem(status_text)
+            if status == "done":
+                status_item.setForeground(QColor("#2e7d32"))
+            elif status == "failed":
+                status_item.setForeground(QColor("#c62828"))
+            elif status == "pending":
+                status_item.setForeground(QColor("#f57f17"))
+            self.task_table.setItem(i, 2, status_item)
+
+            self.task_table.setItem(i, 3, QTableWidgetItem(task.get("submitted_at", "")))
+
+            result = task.get("result", "")
+            self.task_table.setItem(i, 4, QTableWidgetItem(result))

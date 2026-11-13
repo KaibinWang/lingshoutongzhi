@@ -10,17 +10,20 @@ from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QPushButton, QLabel, QTableWidget, QTableWidgetItem, QHeaderView,
     QAbstractItemView, QCheckBox, QTextEdit, QPlainTextEdit, QGroupBox,
-    QProgressBar, QMessageBox, QDialog, QDialogButtonBox,
+    QProgressBar, QMessageBox, QDialog, QDialogButtonBox, QAction,
+    QComboBox, QScrollArea,
 )
 from PyQt5.QtCore import Qt, QThread, QObject, pyqtSignal
-from PyQt5.QtGui import QFont
+from PyQt5.QtGui import QFont, QColor, QPixmap
+from pathlib import Path
 
+from core.version import APP_NAME, APP_VERSION, VERSION_DISPLAY
 from core.approval import (
     PendingTaskStore, AuditLog, AUDIT_FILE,
     STATUS_PENDING, STATUS_APPROVED, STATUS_SENDING,
     STATUS_DONE, STATUS_FAILED, STATUS_REJECTED,
 )
-from core.sender import WebhookSender, SendResult, SendLog
+from core.sender import WebhookSender, SendResult, SendLog, STAGE_LABELS, format_results
 from core.personal_sender import PersonalSender
 from core.auth import ROLE_LABELS
 
@@ -34,6 +37,15 @@ COL_TIME = 4
 COL_SUBMITTER = 5
 COL_COUNT = 6
 COL_HIDDEN_ID = 7
+
+# ── 逐条结果表列索引 ───────────────────────────────────────
+COL_R_CHECK = 0
+COL_R_NAME = 1
+COL_R_UNIT = 2
+COL_R_STATUS = 3
+COL_R_STAGE = 4
+COL_R_DETAIL = 5
+COL_R_ELAPSED = 6
 
 TYPE_LABELS = {"group": "群组", "personal": "个人"}
 STATUS_LABELS = {
@@ -140,6 +152,8 @@ class ApprovalSendWorker(QObject):
                     task.get("file_paths") or [],
                     progress_callback=lambda c, t, n: self.progress.emit(c, t, n),
                     result_callback=self._on_result,
+                    reviewer=self.reviewer,
+                    content_mode="模板" if task.get("send_mode") == "template" else "统一",
                 )
             else:
                 self.sender = WebhookSender(
@@ -175,7 +189,25 @@ class ApprovalSendWorker(QObject):
         self.audit.log(action, task_id=task_id, reviewer=self.reviewer,
                        target_summary=self._summary(task), detail=f"{success}/{total}")
 
+        # 逐条结果落盘：任务结束时一次性写，供界面/事后定位"哪一笔失败、失败原因"
+        self.store.update_results(task_id, [self._result_to_dict(r) for r in results])
+
         self.task_finished.emit(task_id, success, total, list(results))
+
+    @staticmethod
+    def _result_to_dict(r) -> dict:
+        """SendResult → 纯 dict（JSON 可序列化，供 pending_tasks.json 持久化）"""
+        return {
+            "name": r.group_name,
+            "unit": r.unit,
+            "success": r.success,
+            "stage": r.stage,
+            "message": r.message,
+            "detail": r.detail,
+            "attempts": r.attempts,
+            "elapsed": round(r.elapsed or 0.0, 1),
+            "screenshot": r.screenshot,
+        }
 
     def _on_result(self, result: SendResult):
         """每条目标发送完成即落盘进度，供崩溃续发"""
@@ -190,7 +222,9 @@ class ApprovalSendWorker(QObject):
         sent = list(stored.get("sent_targets") or [])
         remaining = list(stored.get("remaining_targets") or stored.get("targets") or [])
         for t in remaining:
-            if t.get("name") == result.group_name:
+            # 模板模式逐人内容，同姓名跨部门需按 unit 精确匹配；
+            # 统一/群组任务 result.unit 为空 → 短路成纯名字匹配（行为不变）。
+            if t.get("name") == result.group_name and (not result.unit or t.get("unit", "") == result.unit):
                 remaining.remove(t)
                 if result.success:
                     sent.append(t)
@@ -218,7 +252,9 @@ class ApprovalWorkbench(QMainWindow):
         self.worker = None
         self.thread = None
         self.is_executing = False
-        self.setWindowTitle("审批工作台")
+        self._live_results: list = []   # 本次执行的逐条结果（dict）
+        self._result_rows: list = []    # 结果表当前绑定的数据行（供双击定位）
+        self.setWindowTitle(f"审批工作台 - {VERSION_DISPLAY}")
         self.setMinimumSize(960, 640)
         self.init_ui()
         self.check_stale_tasks()
@@ -242,6 +278,12 @@ class ApprovalWorkbench(QMainWindow):
         self.refresh_btn = QPushButton("🔄 刷新")
         self.refresh_btn.clicked.connect(self.refresh)
         toolbar.addWidget(self.refresh_btn)
+
+        self.status_filter = QComboBox()
+        self.status_filter.addItem("待审批", STATUS_PENDING)
+        self.status_filter.addItem("全部", None)
+        self.status_filter.currentIndexChanged.connect(self.refresh)
+        toolbar.addWidget(self.status_filter)
 
         self.select_all_btn = QPushButton("全选")
         self.select_all_btn.clicked.connect(self.select_all)
@@ -295,6 +337,29 @@ class ApprovalWorkbench(QMainWindow):
         self.progress_bar.setVisible(False)
         right_layout.addWidget(self.progress_bar)
 
+        # 逐条结果（失败行标红，双击查看失败截图）
+        results_group = QGroupBox("逐条结果")
+        results_inner = QVBoxLayout(results_group)
+        self.results_table = QTableWidget()
+        self.results_table.setColumnCount(7)
+        self.results_table.setHorizontalHeaderLabels(
+            ["", "姓名", "部门", "状态", "失败阶段", "备注", "耗时"]
+        )
+        self.results_table.setColumnWidth(COL_R_CHECK, 30)
+        self.results_table.setColumnWidth(COL_R_NAME, 90)
+        self.results_table.setColumnWidth(COL_R_UNIT, 110)
+        self.results_table.setColumnWidth(COL_R_STATUS, 50)
+        self.results_table.setColumnWidth(COL_R_STAGE, 80)
+        self.results_table.setColumnWidth(COL_R_ELAPSED, 60)
+        self.results_table.horizontalHeader().setSectionResizeMode(COL_R_DETAIL, QHeaderView.Stretch)
+        self.results_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.results_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.results_table.setAlternatingRowColors(True)
+        self.results_table.setMinimumHeight(120)
+        self.results_table.itemDoubleClicked.connect(self._on_result_row_dclicked)
+        results_inner.addWidget(self.results_table)
+        right_layout.addWidget(results_group, 1)
+
         self.status_label = QLabel("就绪")
         right_layout.addWidget(self.status_label)
 
@@ -326,28 +391,62 @@ class ApprovalWorkbench(QMainWindow):
         splitter.setSizes([520, 440])
         root.addWidget(splitter)
 
+        self.create_menu_bar()
+
+    def create_menu_bar(self):
+        """菜单栏（QMainWindow 原生菜单条，位于 central widget 之上，不挤占布局）"""
+        menubar = self.menuBar()
+        help_menu = menubar.addMenu("帮助(&H)")
+        about = QAction("关于(&A)", self)
+        about.triggered.connect(self.show_about)
+        help_menu.addAction(about)
+
+    def show_about(self):
+        QMessageBox.about(
+            self, "关于",
+            f"<h3>{APP_NAME}</h3><p>版本: {APP_VERSION}</p>"
+            "<p>审批工作台：审核经办人提交的通知任务，通过后执行真实发送；"
+            "支持断点续发与全程审计。</p>"
+        )
+
     # ── 列表刷新与勾选 ────────────────────────────────────
     def refresh(self):
+        """刷新任务列表；状态筛选：待审批（默认）/ 全部 —— 全部时可选历史任务查看结果"""
         self.table.setRowCount(0)
-        tasks = self.store.list(status=STATUS_PENDING)
+        status = self.status_filter.currentData()
+        tasks = self.store.list(status=status)
         self.table.setRowCount(len(tasks))
         for i, t in enumerate(tasks):
-            cb = QCheckBox()
-            cell = QWidget()
-            cb_lay = QHBoxLayout(cell)
-            cb_lay.addWidget(cb)
-            cb_lay.setAlignment(Qt.AlignCenter)
-            cb_lay.setContentsMargins(0, 0, 0, 0)
-            self.table.setCellWidget(i, COL_CHECK, cell)
+            is_pending = t.get("status") == STATUS_PENDING
+            if is_pending:
+                # 只有待审批的记录可勾选审批
+                cb = QCheckBox()
+                cell = QWidget()
+                cb_lay = QHBoxLayout(cell)
+                cb_lay.addWidget(cb)
+                cb_lay.setAlignment(Qt.AlignCenter)
+                cb_lay.setContentsMargins(0, 0, 0, 0)
+                self.table.setCellWidget(i, COL_CHECK, cell)
+            else:
+                self.table.removeCellWidget(i, COL_CHECK)
+                self.table.setItem(i, COL_CHECK, QTableWidgetItem("—"))
 
+            status_item = QTableWidgetItem(STATUS_LABELS.get(t.get("status"), t.get("status", "")))
+            if t.get("status") == STATUS_FAILED:
+                status_item.setForeground(QColor("#c62828"))
+            elif t.get("status") == STATUS_DONE:
+                status_item.setForeground(QColor("#2e7d32"))
             self.table.setItem(i, COL_ID, QTableWidgetItem(str(t.get("id", ""))))
             self.table.setItem(i, COL_TYPE, QTableWidgetItem(TYPE_LABELS.get(t.get("type"), t.get("type", ""))))
-            self.table.setItem(i, COL_STATUS, QTableWidgetItem(STATUS_LABELS.get(t.get("status"), t.get("status", ""))))
+            self.table.setItem(i, COL_STATUS, status_item)
             self.table.setItem(i, COL_TIME, QTableWidgetItem(t.get("submitted_at", "")))
             self.table.setItem(i, COL_SUBMITTER, QTableWidgetItem(t.get("submitter", "")))
             self.table.setItem(i, COL_COUNT, QTableWidgetItem(str(len(t.get("targets") or []))))
             self.table.setItem(i, COL_HIDDEN_ID, QTableWidgetItem(str(t.get("id", ""))))
-        self.stats_label.setText(f"待审批 {len(tasks)} 条")
+        if status == STATUS_PENDING:
+            self.stats_label.setText(f"待审批 {len(tasks)} 条")
+        else:
+            self.stats_label.setText(f"共 {len(tasks)} 条")
 
     def select_all(self):
         all_checked = True
@@ -397,16 +496,42 @@ class ApprovalWorkbench(QMainWindow):
             return
         self.content_edit.setPlainText(task.get("content", ""))
         lines = []
+        template_mode = task.get("send_mode") == "template"
         for t in task.get("targets") or []:
             if task.get("type") == "group":
                 lines.append(f"{t.get('name')}  [{t.get('category', '默认')}]")
+            elif template_mode:
+                # 模板消息：逐条展示每个人自己的消息，便于审批人核对
+                body = t.get("content", "")
+                preview = body[:60] + ("…" if len(body) > 60 else "")
+                files = t.get("file_paths")
+                att = ""
+                if files is not None:
+                    att = f"  📎 附件 {len(files)} 个" if files else "  （无附件）"
+                lines.append(f"{t.get('name')} [{t.get('unit', '')}]\n  {preview}{att}")
             else:
                 lines.append(f"{t.get('name')}  [{t.get('unit', '')}]")
+
+        # 发送结果（历史任务）：逐条渲染 成败/阶段/备注/截图
+        result_lines = format_results(task)
+        if result_lines:
+            lines.append("")
+            lines.append("── 发送结果 ──")
+            lines.extend(result_lines)
         self.targets_edit.setPlainText("\n".join(lines))
+
+        # 非执行中：把该任务已落盘的逐条结果填进结果表（执行中不清屏，避免打断实时结果）
+        if not self.is_executing:
+            self._refresh_results_table(task.get("results") or [])
 
     # ── 审批操作 ──────────────────────────────────────────
     def _reviewer(self) -> str:
         role = self.auth.current_role if self.auth else None
+        if self.auth and role:
+            record = self.auth.records.get(role, {})
+            sso_account = record.get("sso_account", "")
+            if sso_account:
+                return sso_account
         return ROLE_LABELS.get(role, "审批人")
 
     @staticmethod
@@ -502,8 +627,86 @@ class ApprovalWorkbench(QMainWindow):
         self.status_label.setText(f"[{current}/{total}] {name}")
 
     def _on_result(self, result):
-        # 需要时可在右侧扩展逐条结果展示，当前仅推进进度
-        pass
+        """逐条结果实时进表，失败行标红，双击可看失败截图"""
+        self._live_results.append(self._norm(result))
+        self._refresh_results_table(self._live_results)
+
+    @staticmethod
+    def _norm(r) -> dict:
+        """SendResult / dict → 统一 dict（结果表与持久化共用同一形状）"""
+        if isinstance(r, dict):
+            return r
+        return {
+            "name": r.group_name,
+            "unit": r.unit,
+            "success": r.success,
+            "stage": r.stage,
+            "message": r.message,
+            "detail": r.detail,
+            "elapsed": r.elapsed or 0.0,
+            "screenshot": r.screenshot,
+        }
+
+    def _refresh_results_table(self, items: list):
+        self._result_rows = items
+        self.results_table.setRowCount(len(items))
+        for i, r in enumerate(items):
+            ok = bool(r.get("success"))
+            self.results_table.setItem(i, COL_R_CHECK, QTableWidgetItem("✓" if ok else "✗"))
+            self.results_table.setItem(i, COL_R_NAME, QTableWidgetItem(str(r.get("name", ""))))
+            self.results_table.setItem(i, COL_R_UNIT, QTableWidgetItem(str(r.get("unit", ""))))
+            self.results_table.setItem(i, COL_R_STATUS, QTableWidgetItem("成功" if ok else "失败"))
+            self.results_table.setItem(
+                i, COL_R_STAGE,
+                QTableWidgetItem("" if ok else STAGE_LABELS.get(r.get("stage", ""), r.get("stage", "") or "")),
+            )
+            self.results_table.setItem(
+                i, COL_R_DETAIL,
+                QTableWidgetItem(str(r.get("detail") or r.get("message") or "")),
+            )
+            elapsed = r.get("elapsed") or 0
+            self.results_table.setItem(i, COL_R_ELAPSED, QTableWidgetItem(f"{elapsed:.1f}"))
+            if not ok:
+                for c in range(COL_R_ELAPSED + 1):
+                    item = self.results_table.item(i, c)
+                    if item is not None:
+                        item.setForeground(QColor("#c62828"))
+
+    def _on_result_row_dclicked(self, item: QTableWidgetItem):
+        """双击结果行 → 失败时弹截图"""
+        row = item.row()
+        if row < 0 or row >= len(self._result_rows):
+            return
+        r = self._result_rows[row]
+        if r.get("success"):
+            QMessageBox.information(self, "提示", "该笔发送成功，无失败截图。")
+            return
+        self._show_screenshot(str(r.get("screenshot") or ""), str(r.get("name") or ""))
+
+    def _show_screenshot(self, path: str, caption: str = ""):
+        """弹窗显示失败截图；路径为空/不存在则提示无截图"""
+        if not path or not Path(path).exists():
+            QMessageBox.information(self, "失败截图", "无截图（可能当时未打开搜索窗口）。")
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"失败截图  {caption}".strip())
+        dialog.setMinimumSize(640, 480)
+        layout = QVBoxLayout(dialog)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(False)
+        label = QLabel()
+        pixmap = QPixmap(path)
+        if pixmap.isNull():
+            label.setText(f"无法加载截图：{path}")
+        else:
+            label.setPixmap(pixmap.scaled(1400, 900, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        scroll.setWidget(label)
+        layout.addWidget(scroll)
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dialog.reject)
+        buttons.clicked.connect(dialog.accept)
+        layout.addWidget(buttons)
+        dialog.exec_()
 
     def _on_task_started(self, task_id: int):
         task = self.store.get(task_id)
@@ -512,6 +715,9 @@ class ApprovalWorkbench(QMainWindow):
         self.progress_bar.setValue(0)
         self.progress_bar.setVisible(True)
         self.status_label.setText(f"正在发送任务 #{task_id}...")
+        # 新一次执行开始 → 清空逐条结果表
+        self._live_results = []
+        self._refresh_results_table([])
 
     def _on_task_finished(self, task_id: int, success: int, total: int, results: list):
         # 状态与审计已在 worker 内完成，这里仅做界面反馈并刷新列表

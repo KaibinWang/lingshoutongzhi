@@ -5,13 +5,17 @@
 
 import json
 import os
+import sys
 import csv
 from pathlib import Path
 from typing import List, Dict, Optional
 
 
-# 获取数据目录路径
-BASE_DIR = Path(__file__).parent.parent
+# 获取数据目录路径（frozen 时以 exe 所在目录为基准，与 main.py 保持一致）
+if getattr(sys, 'frozen', False):
+    BASE_DIR = Path(os.path.dirname(sys.executable))
+else:
+    BASE_DIR = Path(__file__).parent.parent
 DATA_DIR = BASE_DIR / "data"
 LOGS_DIR = BASE_DIR / "logs"
 

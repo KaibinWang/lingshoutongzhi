@@ -5,22 +5,23 @@
 设计对齐 group_panel.py + send_panel.py 的 PyQt5 风格。
 """
 
-import threading
+import os
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QPushButton, QLabel, QLineEdit, QComboBox, QCheckBox,
-    QTextEdit, QPlainTextEdit, QProgressBar,
+    QTextEdit, QPlainTextEdit,
     QDialog, QFormLayout, QDialogButtonBox,
     QMessageBox, QFileDialog, QGroupBox, QSpinBox, QDoubleSpinBox,
-    QFrame, QListWidget
+    QFrame, QListWidget, QRadioButton, QButtonGroup
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QObject
+from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont, QColor
 from typing import List, Dict, Callable, Optional
 from core.config import PersonConfig
 from core.personal_sender import PersonalSender
-from core.sender import SendResult
+from core.personal_template import parse_template_file
+from core.sender import format_results
 from PyQt5.QtWidgets import QToolButton, QMenu, QWidgetAction, QCheckBox
 from PyQt5.QtCore import pyqtSignal
 
@@ -69,46 +70,6 @@ class MultiCheckFilterButton(QToolButton):
     def _update_text(self):
         n = len(self.checked_items())
         self.setText(f"{self._label}({n})" if n else self._label)
-
-
-# ── 后台发送线程 ───────────────────────────────────────────────────────────
-
-class PersonalSendWorker(QObject):
-    """在子线程中运行发送任务，通过信号与 UI 通信"""
-
-    progress  = pyqtSignal(int, int, str)     # current, total, name
-    result    = pyqtSignal(object)            # SendResult
-    finished  = pyqtSignal(int, int)          # success_count, total
-
-    # def __init__(self, sender: PersonalSender, persons: list, content: str):
-    #     super().__init__()
-    #     self.sender  = sender
-    #     self.persons = persons
-    #     self.content = content
-    def __init__(self, sender: PersonalSender, persons: list, content: str, file_paths: list = None):
-        super().__init__()
-        self.sender     = sender
-        self.persons    = persons
-        self.content    = content
-        self.file_paths = file_paths or []
-
-    def run(self):
-        # results = self.sender.send_to_persons(
-        #     self.persons,
-        #     self.content,
-        #     progress_callback=lambda cur, tot, name: self.progress.emit(cur, tot, name),
-        #     result_callback=lambda r: self.result.emit(r),
-        # )
-        results = self.sender.send_to_persons(
-            self.persons,
-            self.content,
-            self.file_paths,
-            progress_callback=lambda cur, tot, name: self.progress.emit(cur, tot, name),
-            result_callback=lambda r: self.result.emit(r),
-        )
-        #new
-        success = sum(1 for r in results if r.success)
-        self.finished.emit(success, len(results))
 
 
 # ── 联系人编辑对话框 ───────────────────────────────────────────────────────
@@ -189,12 +150,10 @@ class PersonalPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.person_config = PersonConfig()
-        self.sender        = None
-        self.worker        = None
-        self.thread        = None
-        self.is_sending    = False
+        self.template_rows: List[dict] = []   # 模板消息模式下解析出的逐人数据
         self.init_ui()
         self.refresh_table()
+        self.refresh_tasks()
 
     # ── UI 初始化 ──────────────────────────────────────────────────────────
 
@@ -301,9 +260,25 @@ class PersonalPanel(QWidget):
         right_layout.setContentsMargins(4, 0, 0, 0)
         right_layout.setSpacing(8)
 
+        # 发送模式开关（统一消息 / 模板消息）
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("发送模式："))
+        self.mode_unified_radio  = QRadioButton("统一消息")
+        self.mode_template_radio = QRadioButton("模板消息")
+        self.mode_group = QButtonGroup(self)
+        self.mode_group.addButton(self.mode_unified_radio)
+        self.mode_group.addButton(self.mode_template_radio)
+        self.mode_unified_radio.setChecked(True)
+        self.mode_unified_radio.setToolTip("所有联系人发送同一段消息")
+        self.mode_template_radio.setToolTip("从模板文件导入，每人内容独立")
+        mode_row.addWidget(self.mode_unified_radio)
+        mode_row.addWidget(self.mode_template_radio)
+        mode_row.addStretch()
+        right_layout.addLayout(mode_row)
+
         # 消息编辑区
-        msg_group = QGroupBox("消息内容")
-        msg_inner  = QVBoxLayout(msg_group)
+        self.msg_group = QGroupBox("消息内容")
+        msg_inner  = QVBoxLayout(self.msg_group)
         self.msg_edit = QPlainTextEdit()
         self.msg_edit.setPlaceholderText(
             "请输入发送内容（纯文本）。\n\n"
@@ -318,12 +293,74 @@ class PersonalPanel(QWidget):
         char_row.addStretch()
         char_row.addWidget(self.char_count_label)
         msg_inner.addLayout(char_row)
-        right_layout.addWidget(msg_group)
+        right_layout.addWidget(self.msg_group)
+
+        # 模板消息区（模板模式下显示）
+        self.tpl_group = QGroupBox("模板消息")
+        tpl_inner = QVBoxLayout(self.tpl_group)
+
+        tpl_btn_row = QHBoxLayout()
+        self.download_tpl_btn = QPushButton("📄 下载模板")
+        self.download_tpl_btn.setToolTip("导出一份空白模板（含表头与示例行），照填后再点「导入模板」")
+        self.import_tpl_btn = QPushButton("📥 导入模板")
+        self.clear_tpl_btn  = QPushButton("🗑️ 清空模板")
+        tpl_btn_row.addWidget(self.download_tpl_btn)
+        tpl_btn_row.addWidget(self.import_tpl_btn)
+        tpl_btn_row.addWidget(self.clear_tpl_btn)
+        tpl_btn_row.addStretch()
+        self.tpl_count_label = QLabel("共 0 条")
+        self.tpl_count_label.setStyleSheet("color: #666; font-size: 12px;")
+        tpl_btn_row.addWidget(self.tpl_count_label)
+        tpl_inner.addLayout(tpl_btn_row)
+
+        # 附件来源：所有人相同（用下方附件列表） / 每人不同（读模板「附件」列）
+        attach_row = QHBoxLayout()
+        attach_row.addWidget(QLabel("附件来源："))
+        self.att_same_radio     = QRadioButton("所有人相同")
+        self.att_per_person_radio = QRadioButton("每人不同（读模板「附件」列）")
+        self.att_group = QButtonGroup(self)
+        self.att_group.addButton(self.att_same_radio)
+        self.att_group.addButton(self.att_per_person_radio)
+        self.att_same_radio.setChecked(True)
+        self.att_same_radio.setToolTip("所有收件人发送下方「附件文件」列表里的同一份文件")
+        self.att_per_person_radio.setToolTip("每人的附件取模板「附件」列（多个路径用 ; 分隔）")
+        attach_row.addWidget(self.att_same_radio)
+        attach_row.addWidget(self.att_per_person_radio)
+        attach_row.addStretch()
+        tpl_inner.addLayout(attach_row)
+
+        self.tpl_table = QTableWidget()
+        self.tpl_table.setColumnCount(4)
+        self.tpl_table.setHorizontalHeaderLabels(["姓名", "部门", "附件", "消息预览"])
+        self.tpl_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.tpl_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.tpl_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.tpl_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self.tpl_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.tpl_table.setAlternatingRowColors(True)
+        self.tpl_table.setMaximumHeight(140)
+        tpl_inner.addWidget(self.tpl_table)
+
+        tpl_tip = QLabel(
+            "模板文件需包含三列：姓名 / 部门 / 消息；"
+            "「每人不同」时另需一列「附件」（多个路径用 ; 分隔，支持 .xlsx、.csv）"
+        )
+        tpl_tip.setStyleSheet("color: #888; font-size: 11px;")
+        tpl_tip.setWordWrap(True)
+        tpl_inner.addWidget(tpl_tip)
+
+        self.tpl_group.setVisible(False)
+        right_layout.addWidget(self.tpl_group)
 
         # 文件上传区
-        file_group = QGroupBox("附件文件（可选）")
-        file_inner = QVBoxLayout(file_group)
- 
+        self.file_group = QGroupBox("附件文件（可选）")
+        file_inner = QVBoxLayout(self.file_group)
+        self.file_group_hint = QLabel("")   # 模板模式下「每人不同」时提示禁用原因
+        self.file_group_hint.setStyleSheet("color: #e65100; font-size: 11px;")
+        self.file_group_hint.setWordWrap(True)
+        self.file_group_hint.setVisible(False)
+        file_inner.addWidget(self.file_group_hint)
+
         file_btn_row = QHBoxLayout()
         self.add_file_btn = QPushButton("➕ 添加文件")
         self.clear_file_btn = QPushButton("🗑️ 清空")
@@ -337,7 +374,7 @@ class PersonalPanel(QWidget):
         self.file_list.setAlternatingRowColors(True)
         file_inner.addWidget(self.file_list)
  
-        right_layout.addWidget(file_group)
+        right_layout.addWidget(self.file_group)
         # 文件上传区end
 
         # 发送参数
@@ -376,9 +413,9 @@ class PersonalPanel(QWidget):
         tip_layout = QVBoxLayout(tip_frame)
         tip_layout.setContentsMargins(8, 6, 8, 6)
         tip_label = QLabel(
-            "⚠️  发送前请确认：企业微信 PC 端已打开并登录。\n"
-            "点击「开始发送」后请勿操作鼠标和键盘。\n"
-            "紧急停止：将鼠标快速移到屏幕<b>左上角</b>。"
+            "⚠️  本机自动化发送前请确认：企业微信 PC 端已打开并登录。\n"
+            "点击「提交审批」只登记任务，审批人通过后才自动发送。\n"
+            "自动发送期间请勿操作鼠标和键盘；紧急停止：将鼠标快速移到屏幕<b>左上角</b>。"
         )
         tip_label.setTextFormat(Qt.RichText)
         tip_label.setStyleSheet("font-size: 12px; color: #5d4037;")
@@ -386,7 +423,7 @@ class PersonalPanel(QWidget):
         tip_layout.addWidget(tip_label)
         right_layout.addWidget(tip_frame)
 
-        # 进度条 + 控制按钮
+        # 控制按钮
         ctrl_row = QHBoxLayout()
         self.send_btn = QPushButton("🚀 提交审批")
         self.send_btn.setMinimumHeight(34)
@@ -395,39 +432,47 @@ class PersonalPanel(QWidget):
             "QPushButton:hover { background: #1565c0; }"
             "QPushButton:disabled { background: #bdbdbd; }"
         )
-        self.stop_btn = QPushButton("⏹ 停止")
-        self.stop_btn.setMinimumHeight(34)
-        self.stop_btn.setEnabled(False)
-        self.stop_btn.setStyleSheet(
-            "QPushButton { background: #e53935; color: white; border-radius: 4px; font-size: 13px; }"
-            "QPushButton:hover { background: #c62828; }"
-            "QPushButton:disabled { background: #bdbdbd; }"
-        )
         ctrl_row.addWidget(self.send_btn)
-        ctrl_row.addWidget(self.stop_btn)
         right_layout.addLayout(ctrl_row)
 
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setVisible(False)
-        self.progress_bar.setTextVisible(True)
-        right_layout.addWidget(self.progress_bar)
+        # 我的任务区（默认只看本人发送面板提交的个人任务）
+        task_group = QGroupBox("我的任务")
+        task_inner = QVBoxLayout(task_group)
 
-        # 日志区
-        log_group = QGroupBox("发送日志")
-        log_inner  = QVBoxLayout(log_group)
-        self.log_edit = QTextEdit()
-        self.log_edit.setReadOnly(True)
-        self.log_edit.setFont(QFont("Consolas", 10))
-        self.log_edit.setMinimumHeight(120)
-        log_inner.addWidget(self.log_edit)
+        task_btn_row = QHBoxLayout()
+        self.refresh_task_btn = QPushButton("🔄 刷新")
+        self.refresh_task_btn.clicked.connect(self.refresh_tasks)
+        task_btn_row.addWidget(self.refresh_task_btn)
 
-        log_btn_row = QHBoxLayout()
-        self.clear_log_btn = QPushButton("清空日志")
-        self.clear_log_btn.clicked.connect(self.log_edit.clear)
-        log_btn_row.addStretch()
-        log_btn_row.addWidget(self.clear_log_btn)
-        log_inner.addLayout(log_btn_row)
-        right_layout.addWidget(log_group)
+        self.task_type_filter = QComboBox()
+        self.task_type_filter.addItem("个人发送", "personal")
+        self.task_type_filter.addItem("群组发送", "group")
+        self.task_type_filter.addItem("全部", None)
+        self.task_type_filter.currentIndexChanged.connect(self.refresh_tasks)
+        task_btn_row.addWidget(self.task_type_filter)
+
+        hint = QLabel("（双击任务行查看逐条结果与失败截图）")
+        hint.setStyleSheet("color: #757575;")
+        task_btn_row.addWidget(hint)
+        task_btn_row.addStretch()
+        task_inner.addLayout(task_btn_row)
+
+        self.task_table = QTableWidget()
+        self.task_table.setColumnCount(5)
+        self.task_table.setHorizontalHeaderLabels(["ID", "类型", "状态", "提交时间", "结果"])
+        self.task_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.task_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        self.task_table.setColumnWidth(0, 40)
+        self.task_table.setColumnWidth(1, 50)
+        self.task_table.setColumnWidth(3, 130)
+        self.task_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.task_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.task_table.setAlternatingRowColors(True)
+        self.task_table.setMaximumHeight(180)
+        self.task_table.itemDoubleClicked.connect(self._show_task_detail)
+        task_inner.addWidget(self.task_table)
+
+        right_layout.addWidget(task_group)
 
         splitter.addWidget(right)
         splitter.setSizes([480, 420])
@@ -448,13 +493,18 @@ class PersonalPanel(QWidget):
         self.tag_filter.changed.connect(self.filter_table)
 
         self.send_btn.clicked.connect(self.start_send)
-        self.stop_btn.clicked.connect(self.stop_send)
         self.msg_edit.textChanged.connect(self._update_char_count)
         self.table.doubleClicked.connect(self.edit_person)
         # new
         self.add_file_btn.clicked.connect(self.add_files)
         self.clear_file_btn.clicked.connect(self.file_list.clear)
         self.select_all_btn.clicked.connect(self.toggle_select_all)
+        # 发送模式 / 模板
+        self.mode_unified_radio.toggled.connect(self._on_mode_changed)
+        self.att_per_person_radio.toggled.connect(self._sync_file_group_state)
+        self.download_tpl_btn.clicked.connect(self.download_template)
+        self.import_tpl_btn.clicked.connect(self.import_template)
+        self.clear_tpl_btn.clicked.connect(self.clear_template)
 
     # ── 表格管理 ──────────────────────────────────────────────────────────
 
@@ -739,8 +789,8 @@ class PersonalPanel(QWidget):
         self._show_import_result(ok, fail, errors)
         self.refresh_table()
 
-    def _show_import_result(self, ok, fail, errors):
-        msg = f"导入完成\n成功：{ok} 位\n失败：{fail} 位"
+    def _show_import_result(self, ok, fail, errors, unit="位"):
+        msg = f"导入完成\n成功：{ok} {unit}\n失败：{fail} {unit}"
         if errors:
             msg += "\n\n错误详情：\n" + "\n".join(errors[:10])
             if len(errors) > 10:
@@ -759,6 +809,164 @@ class PersonalPanel(QWidget):
             QMessageBox.information(self, "导出成功", f"已导出到：\n{path}")
         else:
             QMessageBox.warning(self, "导出失败", "导出时发生错误，请检查文件路径")
+
+    # ── 模板消息 ───────────────────────────────────────────────────────────
+
+    def _on_mode_changed(self):
+        """统一消息 / 模板消息 互斥切换（只让一个组可见，右侧高度不膨胀）"""
+        unified = self.mode_unified_radio.isChecked()
+        self.msg_group.setVisible(unified)
+        self.tpl_group.setVisible(not unified)
+        self._sync_file_group_state()
+
+    def _attachments_per_person(self) -> bool:
+        """当前是否处于「模板消息 + 每人附件不同」"""
+        return self.mode_template_radio.isChecked() and self.att_per_person_radio.isChecked()
+
+    def _sync_file_group_state(self):
+        """「每人不同」时全局附件列表无意义，禁用并给出提示"""
+        per_person = self._attachments_per_person()
+        self.file_group.setEnabled(not per_person)
+        self.file_group_hint.setVisible(per_person)
+        self.file_group_hint.setText(
+            "当前为『每人不同』，附件改由模板「附件」列指定，此列表已停用。" if per_person else ""
+        )
+
+    def download_template(self):
+        """导出空白模板（表头 + 示例行），供用户照填后导入。
+
+        模板内容随「附件来源」而不同：
+          · 所有人相同 → 三列（姓名/部门/消息）
+          · 每人不同   → 四列，并在「附件」列给出示例路径
+        """
+        default_name = "个人发送模板_含附件" if self._attachments_per_person() else "个人发送模板"
+        path, selected = QFileDialog.getSaveFileName(
+            self, "保存模板文件", default_name,
+            "Excel 模板 (*.xlsx);;CSV 模板 (*.csv)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith((".xlsx", ".csv")):
+            path += ".csv" if "CSV" in selected else ".xlsx"
+
+        with_files = self._attachments_per_person()
+        if path.lower().endswith(".xlsx"):
+            ok = self._export_template_excel(path, with_files=with_files)
+        else:
+            ok = self._export_template_csv(path, with_files=with_files)
+
+        if ok:
+            if with_files:
+                tip = ("请按「姓名 / 部门 / 消息 / 附件」四列填写，保存后点「导入模板」。\n"
+                       "「附件」列填文件的完整路径，多个用 ; 分隔；留空表示此人不发附件。")
+            else:
+                tip = ("请按「姓名 / 部门 / 消息」三列填写，保存后点「导入模板」。\n"
+                       "（当前附件来源为「所有人相同」，如要每人不同，请先切换后再下载模板。）")
+            QMessageBox.information(self, "模板已保存", f"模板已保存到：\n{path}\n\n{tip}")
+
+    def _export_template_csv(self, path, with_files: bool = False) -> bool:
+        import csv
+        try:
+            with open(path, "w", encoding="utf-8-sig", newline="") as f:
+                writer = csv.writer(f)
+                if with_files:
+                    writer.writerow(["姓名", "部门", "消息", "附件"])
+                    writer.writerow([
+                        "张三", "一部门", "这是发给张三的示例消息，请整段替换。",
+                        r"D:\通知\张三的附件.pdf",
+                    ])
+                    writer.writerow([
+                        "李四", "二部门", "这是发给李四的示例消息，请整段替换。",
+                        r"D:\通知\李四的附件.pdf;D:\通知\李四的补充说明.docx",
+                    ])
+                else:
+                    writer.writerow(["姓名", "部门", "消息"])
+                    writer.writerow(["张三", "一部门", "这是发给张三的示例消息，请整段替换。"])
+                    writer.writerow(["李四", "二部门", "这是发给李四的示例消息，请整段替换。"])
+            return True
+        except Exception as e:
+            QMessageBox.warning(self, "保存失败", f"保存模板时发生错误：\n{e}")
+            return False
+
+    def _export_template_excel(self, path, with_files: bool = False) -> bool:
+        try:
+            from openpyxl import Workbook
+        except ImportError:
+            QMessageBox.warning(
+                self, "缺少依赖",
+                "需要安装 openpyxl 库才能生成 Excel 模板，请改用 CSV 模板。"
+            )
+            return False
+        try:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "模板消息"
+            if with_files:
+                ws.append(["姓名", "部门", "消息", "附件"])
+                ws.append([
+                    "张三", "一部门", "这是发给张三的示例消息，请整段替换。",
+                    r"D:\通知\张三的附件.pdf",
+                ])
+                ws.append([
+                    "李四", "二部门", "这是发给李四的示例消息，请整段替换。",
+                    r"D:\通知\李四的附件.pdf;D:\通知\李四的补充说明.docx",
+                ])
+            else:
+                ws.append(["姓名", "部门", "消息"])
+                ws.append(["张三", "一部门", "这是发给张三的示例消息，请整段替换。"])
+                ws.append(["李四", "二部门", "这是发给李四的示例消息，请整段替换。"])
+            ws.column_dimensions["A"].width = 14
+            ws.column_dimensions["B"].width = 16
+            ws.column_dimensions["C"].width = 50
+            if with_files:
+                ws.column_dimensions["D"].width = 46
+            wb.save(path)
+            return True
+        except Exception as e:
+            QMessageBox.warning(self, "保存失败", f"保存模板时发生错误：\n{e}")
+            return False
+
+    def import_template(self):
+        """导入模板文件（姓名 / 部门 / 消息）"""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择模板文件", "", "模板文件 (*.xlsx *.csv);;所有文件 (*)"
+        )
+        if not path:
+            return
+        rows, errors = parse_template_file(path)
+        if not rows:
+            self._show_import_result(0, len(errors), errors, unit="条")
+            return
+        self.template_rows = rows
+        self._refresh_template_table()
+        self._show_import_result(len(rows), len(errors), errors, unit="条")
+
+    def clear_template(self):
+        """清空已导入的模板数据"""
+        if not self.template_rows:
+            return
+        reply = QMessageBox.question(
+            self, "确认清空",
+            f"确定要清空已导入的 {len(self.template_rows)} 条模板消息吗？",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        self.template_rows = []
+        self._refresh_template_table()
+
+    def _refresh_template_table(self):
+        """刷新模板消息表格与计数"""
+        self.tpl_table.setRowCount(len(self.template_rows))
+        for i, r in enumerate(self.template_rows):
+            files = r.get("files") or []
+            attach_text = f"{len(files)} 个" if files else "—"
+            self.tpl_table.setItem(i, 0, QTableWidgetItem(r.get("name", "")))
+            self.tpl_table.setItem(i, 1, QTableWidgetItem(r.get("unit", "")))
+            self.tpl_table.setItem(i, 2, QTableWidgetItem(attach_text))
+            self.tpl_table.setItem(i, 3, QTableWidgetItem(r.get("content", "")))
+        self.tpl_count_label.setText(f"共 {len(self.template_rows)} 条")
+
     # new
     def add_files(self):
         """选择要发送的文件"""
@@ -825,15 +1033,33 @@ class PersonalPanel(QWidget):
 
     def start_send(self):
         """提交审批任务（不再直接发送，交由审批人审批后执行）"""
-        content = self.msg_edit.toPlainText().strip()
-        if not content:
-            QMessageBox.warning(self, "提示", "请输入消息内容")
-            return
+        template_mode = self.mode_template_radio.isChecked()
 
-        targets = self._get_target_persons()
-        if not targets:
-            QMessageBox.warning(self, "提示", "没有符合条件的启用联系人\n请检查所在单位筛选或联系人列表")
-            return
+        if template_mode:
+            if not self.template_rows:
+                QMessageBox.warning(self, "提示", "请先导入模板文件")
+                return
+            per_person_att = self._attachments_per_person()
+            targets = []
+            for r in self.template_rows:
+                t = {"name": r["name"], "unit": r["unit"], "content": r["content"]}
+                if per_person_att:
+                    # 明确给出每人的附件（空列表=此人只发文字）
+                    t["file_paths"] = list(r.get("files") or [])
+                targets.append(t)
+            if per_person_att:
+                content = f"（模板消息）共 {len(targets)} 人，每人内容与附件独立"
+            else:
+                content = f"（模板消息）共 {len(targets)} 人，每人内容独立"
+        else:
+            content = self.msg_edit.toPlainText().strip()
+            if not content:
+                QMessageBox.warning(self, "提示", "请输入消息内容")
+                return
+            targets = self._get_target_persons()
+            if not targets:
+                QMessageBox.warning(self, "提示", "没有符合条件的启用联系人\n请检查所在单位筛选或联系人列表")
+                return
 
         # 检查依赖
         ok, dep_msg = PersonalSender.check_dependencies()
@@ -841,16 +1067,33 @@ class PersonalPanel(QWidget):
             QMessageBox.critical(self, "缺少依赖", dep_msg)
             return
 
-        # 确认对话框
-        units_sel = self.unit_filter.checked_items()
-        unit_desc = f"【{'、'.join(units_sel)}】" if units_sel else "【全部】"
-        confirm_text = (
-            f"即将提交以下范围的通知：\n\n"
-            f"  部门筛选：{unit_desc}\n"
-            f"  目标人数：{len(targets)} 位（已启用且可见）\n\n"
-            f"消息内容（前50字）：\n{content[:50]}{'…' if len(content) > 50 else ''}\n\n"
-            f"确认提交审批？"
-        )
+        # 确认对话框（两模式分别展示）
+        if template_mode:
+            first = targets[0]
+            first_preview = first["content"][:50] + ("…" if len(first["content"]) > 50 else "")
+            if per_person_att:
+                n_with_files = sum(1 for t in targets if t.get("file_paths"))
+                total_files = sum(len(t.get("file_paths") or []) for t in targets)
+                att_desc = f"每人不同（{n_with_files} 人带附件，共 {total_files} 个）"
+            else:
+                att_desc = f"所有人相同（{len(self.get_file_paths())} 个）"
+            confirm_text = (
+                f"即将提交以下范围的通知：\n\n"
+                f"  目标人数：{len(targets)} 位（模板导入，每人内容独立）\n"
+                f"  附件：{att_desc}\n\n"
+                f"首条示例（{first['name']}）：\n{first_preview}\n\n"
+                f"确认提交审批？"
+            )
+        else:
+            units_sel = self.unit_filter.checked_items()
+            unit_desc = f"【{'、'.join(units_sel)}】" if units_sel else "【全部】"
+            confirm_text = (
+                f"即将提交以下范围的通知：\n\n"
+                f"  部门筛选：{unit_desc}\n"
+                f"  目标人数：{len(targets)} 位（已启用且可见）\n\n"
+                f"消息内容（前50字）：\n{content[:50]}{'…' if len(content) > 50 else ''}\n\n"
+                f"确认提交审批？"
+            )
         reply = QMessageBox.question(self, "确认提交", confirm_text, QMessageBox.Yes | QMessageBox.No)
         if reply != QMessageBox.Yes:
             return
@@ -863,19 +1106,25 @@ class PersonalPanel(QWidget):
             "type": "personal",
             "content": content,
             "targets": targets,
-            "file_paths": self.get_file_paths(),
+            # 「每人不同」时附件在 targets[*]["file_paths"]，全局列表置空以免污染
+            "file_paths": [] if self._attachments_per_person() else self.get_file_paths(),
             "send_params": {
                 "search_delay": self.search_delay_spin.value(),
                 "send_interval": self.send_interval_spin.value(),
             },
             "submitter": ROLE_LABELS.get(ROLE_OPERATOR, "经办人"),
+            "send_mode": "template" if template_mode else "unified",
         }
         store = PendingTaskStore()
         task = store.add(task)
-        AuditLog().log(
-            "submit", task_id=task["id"], operator=task["submitter"],
-            target_summary=f"{len(targets)} 人",
-        )
+        audit_kwargs = {
+            "task_id": task["id"],
+            "operator": task["submitter"],
+            "target_summary": f"{len(targets)} 人",
+        }
+        if template_mode:
+            audit_kwargs["detail"] = "模板消息（附件每人不同）" if self._attachments_per_person() else "模板消息"
+        AuditLog().log("submit", **audit_kwargs)
 
         QMessageBox.information(
             self, "已提交审批",
@@ -883,35 +1132,112 @@ class PersonalPanel(QWidget):
             "审批人通过后才会真实发送。"
         )
 
+        # 刷新任务列表
+        self.refresh_tasks()
 
-    def stop_send(self):
-        if self.sender:
-            self.sender.stop()
-        self._log("⏹ 已发出停止信号，等待当前操作完成…", color="#e65100")
-        self.stop_btn.setEnabled(False)
 
-    def _on_progress(self, current: int, total: int, name: str):
-        self.progress_bar.setValue(current)
-        self.progress_bar.setFormat(f"{current}/{total}  {name}")
+    def refresh_tasks(self):
+        """刷新我的任务列表（按类型筛选：个人发送 / 群组发送 / 全部）"""
+        from core.approval import PendingTaskStore
 
-    def _on_result(self, result: SendResult):
-        if result.success:
-            self._log(f"✓ {result.group_name}  {result.message}", color="#2e7d32")
-        else:
-            self._log(f"✗ {result.group_name}  {result.message}", color="#c62828")
+        STATUS_LABELS = {
+            "pending": "待审批",
+            "approved": "已通过",
+            "sending": "发送中",
+            "done": "已完成",
+            "failed": "失败",
+            "rejected": "已驳回",
+        }
 
-    def _on_finished(self, success: int, total: int):
-        self.is_sending = False
-        self.send_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
-        self.progress_bar.setVisible(False)
-        self._log(
-            f"\n发送完成 — 成功 {success} / 共 {total}",
-            color="#1565c0" if success == total else "#e65100",
-        )
+        store = PendingTaskStore()
+        task_type = self.task_type_filter.currentData()   # "personal" / "group" / None
+        tasks = [t for t in store.list()
+                 if task_type is None or t.get("type") == task_type]
 
-    def _log(self, text: str, color: str = "#212121"):
-        self.log_edit.append(f'<span style="color:{color};">{text}</span>')
-        self.log_edit.verticalScrollBar().setValue(
-            self.log_edit.verticalScrollBar().maximum()
-        )
+        self.task_table.setRowCount(len(tasks))
+        for i, task in enumerate(tasks):
+            self.task_table.setItem(i, 0, QTableWidgetItem(str(task.get("id", ""))))
+            self.task_table.setItem(i, 1, QTableWidgetItem("个人" if task.get("type") == "personal" else "群组"))
+
+            status = task.get("status", "")
+            status_text = STATUS_LABELS.get(status, status)
+            status_item = QTableWidgetItem(status_text)
+            if status == "done":
+                status_item.setForeground(QColor("#2e7d32"))
+            elif status == "failed":
+                status_item.setForeground(QColor("#c62828"))
+            elif status == "pending":
+                status_item.setForeground(QColor("#f57f17"))
+            self.task_table.setItem(i, 2, status_item)
+
+            self.task_table.setItem(i, 3, QTableWidgetItem(task.get("submitted_at", "")))
+
+            result = task.get("result", "")
+            self.task_table.setItem(i, 4, QTableWidgetItem(result))
+
+    def _show_task_detail(self, item: QTableWidgetItem):
+        """双击任务行 → 查看发送对象与逐条结果（含失败阶段/备注/截图）"""
+        from core.approval import PendingTaskStore
+
+        row = item.row()
+        id_item = self.task_table.item(row, 0)
+        if id_item is None or not id_item.text().isdigit():
+            return
+        task = PendingTaskStore().get(int(id_item.text()))
+        if task is None:
+            return
+
+        STATUS_LABELS = {
+            "pending": "待审批", "approved": "已通过", "sending": "发送中",
+            "done": "已完成", "failed": "失败", "rejected": "已驳回",
+        }
+        lines = [
+            f"任务 #{task.get('id')}   状态：{STATUS_LABELS.get(task.get('status'), task.get('status', ''))}",
+            f"提交时间：{task.get('submitted_at', '')}   经办人：{task.get('submitter', '')}",
+        ]
+
+        lines.append("")
+        lines.append("── 发送对象 ──")
+        for t in task.get("targets") or []:
+            lines.append(f"{t.get('name', '')}  [{t.get('unit', '')}]")
+
+        lines.append("")
+        lines.append("── 发送结果 ──")
+        result_lines = format_results(task)
+        lines.extend(result_lines or ["（暂无结果：尚未审批执行，或该任务未产生结果）"])
+
+        # 失败截图：提供按钮用系统默认看图器打开
+        shots = [r.get("screenshot") for r in (task.get("results") or []) if r.get("screenshot")]
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"任务 #{task.get('id')} 详情")
+        dialog.setMinimumSize(680, 480)
+        layout = QVBoxLayout(dialog)
+        edit = QTextEdit()
+        edit.setReadOnly(True)
+        edit.setFont(QFont("Consolas", 10))
+        edit.setPlainText("\n".join(lines))
+        layout.addWidget(edit)
+
+        btn_row = QHBoxLayout()
+        open_btn = QPushButton("查看失败截图")
+        open_btn.setEnabled(bool(shots))
+        open_btn.clicked.connect(lambda: self._open_image(shots[0]))
+        btn_row.addWidget(open_btn)
+        btn_row.addStretch()
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(dialog.reject)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+        dialog.exec_()
+
+    @staticmethod
+    def _open_image(path: str):
+        """用系统默认看图器打开截图"""
+        if not path or not os.path.exists(path):
+            QMessageBox.information(None, "提示", "截图文件不存在（可能已被清理）。")
+            return
+        try:
+            os.startfile(path)
+        except OSError as e:
+            QMessageBox.warning(None, "提示", f"无法打开截图：{e}")

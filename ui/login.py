@@ -14,6 +14,7 @@ from core.auth import (
     AuthManager, MIN_TOKEN_LENGTH,
     ROLE_OPERATOR, ROLE_APPROVER, ROLE_LABELS,
 )
+from core.version import APP_VERSION
 
 
 class LoginDialog(QDialog):
@@ -36,6 +37,11 @@ class LoginDialog(QDialog):
         title.setFont(QFont("Microsoft YaHei", 12, QFont.Bold))
         title.setAlignment(Qt.AlignCenter)
         layout.addWidget(title)
+
+        version = QLabel(f"v{APP_VERSION}")
+        version.setAlignment(Qt.AlignCenter)
+        version.setStyleSheet("color: #999; font-size: 11px;")
+        layout.addWidget(version)
 
         layout.addWidget(QLabel("角色："))
         self.role_combo = QComboBox()
