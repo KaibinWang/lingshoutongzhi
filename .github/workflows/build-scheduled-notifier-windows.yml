@@ -1,0 +1,115 @@
+name: Build scheduled notifier for Windows
+
+on:
+  push:
+    branches:
+      - 'codex/windows-installer-*'
+    paths:
+      - 'scheduled_notifier/**'
+      - 'core/webhook.py'
+      - '.github/workflows/build-scheduled-notifier-windows.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-installer:
+    runs-on: windows-2022
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          architecture: x64
+
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install -r scheduled_notifier/requirements.txt "pyinstaller>=6,<7"
+          if ($LASTEXITCODE -ne 0) { throw 'Python dependency installation failed' }
+
+      - name: Run regression tests
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python -m unittest discover -s scheduled_notifier/tests -v
+          if ($LASTEXITCODE -ne 0) { throw 'Regression tests failed' }
+
+      - name: Build standalone application
+        shell: pwsh
+        run: |
+          python -m PyInstaller --clean --noconfirm --onefile --windowed --name WeComScheduledNotifier --distpath scheduled_notifier/dist --workpath scheduled_notifier/build --specpath scheduled_notifier/build --paths . scheduled_notifier/__main__.py
+          if ($LASTEXITCODE -ne 0) { throw 'Application build failed' }
+
+      - name: Verify standalone application startup
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath "$PWD/scheduled_notifier/dist/WeComScheduledNotifier.exe" -ArgumentList '--smoke-test' -PassThru
+          if (-not $process.WaitForExit(60000)) {
+            Stop-Process -Id $process.Id -Force
+            throw 'Standalone application startup timed out'
+          }
+          if ($process.ExitCode -ne 0) { throw "Standalone application exit code $($process.ExitCode)" }
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco upgrade innosetup --yes --no-progress --limit-output
+          if ($LASTEXITCODE -notin @(0, 3010)) { throw 'Inno Setup installation failed' }
+
+      - name: Build Chinese installer
+        shell: pwsh
+        run: |
+          $compiler = "${env:ProgramFiles(x86)}/Inno Setup 6/ISCC.exe"
+          if (-not (Test-Path $compiler)) { throw 'Inno Setup compiler was not found' }
+          & $compiler scheduled_notifier/installer.iss
+          if ($LASTEXITCODE -ne 0) { throw 'Installer compilation failed' }
+
+      - name: Verify installation, launch and uninstallation
+        shell: pwsh
+        run: |
+          $installer = (Resolve-Path scheduled_notifier/dist/WeComScheduledNotifier-Setup-1.0.0.exe).Path
+          $target = Join-Path $env:RUNNER_TEMP 'WeComScheduledNotifier-installed'
+          $installLog = Join-Path $env:RUNNER_TEMP 'wecom-notifier-install.log'
+          $arguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', "/DIR=`"$target`"", "/LOG=`"$installLog`"", '/TASKS=desktopicon')
+          $setup = Start-Process -FilePath $installer -ArgumentList $arguments -Wait -PassThru
+          if ($setup.ExitCode -ne 0) {
+            Get-Content $installLog
+            throw "Installer exit code $($setup.ExitCode)"
+          }
+          $application = Join-Path $target 'WeComScheduledNotifier.exe'
+          if (-not (Test-Path $application)) { throw 'Installed application is missing' }
+          $desktop = [Environment]::GetFolderPath('Desktop')
+          if (-not (Test-Path (Join-Path $desktop '企业微信群定时通知工具.lnk'))) { throw 'Desktop shortcut is missing' }
+          $process = Start-Process -FilePath $application -ArgumentList '--smoke-test' -PassThru
+          if (-not $process.WaitForExit(60000)) {
+            Stop-Process -Id $process.Id -Force
+            throw 'Installed application startup timed out'
+          }
+          if ($process.ExitCode -ne 0) { throw "Installed application exit code $($process.ExitCode)" }
+          $uninstaller = Join-Path $target 'unins000.exe'
+          $uninstall = Start-Process -FilePath $uninstaller -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') -Wait -PassThru
+          if ($uninstall.ExitCode -ne 0) { throw "Uninstaller exit code $($uninstall.ExitCode)" }
+          if (Test-Path $application) { throw 'Application was left behind after uninstall' }
+
+      - name: Record checksums
+        shell: pwsh
+        run: |
+          Get-ChildItem scheduled_notifier/dist/*.exe | Get-FileHash -Algorithm SHA256 | ForEach-Object {
+            "$($_.Hash.ToLower())  $([System.IO.Path]::GetFileName($_.Path))"
+          } | Set-Content scheduled_notifier/dist/SHA256SUMS.txt -Encoding utf8
+
+      - name: Upload Windows packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: WeComScheduledNotifier-Windows-x64
+          path: |
+            scheduled_notifier/dist/WeComScheduledNotifier.exe
+            scheduled_notifier/dist/WeComScheduledNotifier-Setup-1.0.0.exe
+            scheduled_notifier/dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
