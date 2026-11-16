@@ -58,7 +58,7 @@ jobs:
       - name: Install Inno Setup
         shell: pwsh
         run: |
-          choco upgrade innosetup --yes --no-progress --limit-output
+          choco upgrade innosetup --version=6.5.4 --allow-downgrade --yes --no-progress --limit-output
           if ($LASTEXITCODE -notin @(0, 3010)) { throw 'Inno Setup installation failed' }
 
       - name: Build Chinese installer
