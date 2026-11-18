@@ -26,7 +26,7 @@ scheduled_notifier\dist\WeComScheduledNotifier.exe
 
 仓库提供 GitHub Actions 的 Windows 自动构建流程。流程运行回归测试、生成独立 exe、编译中文安装程序，并验证安装、启动和卸载。
 
-构建产物 `WeComScheduledNotifier-Setup-1.0.0.exe` 提供中文安装向导、开始菜单、桌面快捷方式和卸载入口。默认安装到当前 Windows 用户的本地应用目录。
+构建产物 `WeComScheduledNotifier-Setup-1.0.1.exe` 提供中文安装向导、开始菜单、桌面快捷方式和卸载入口。默认安装到当前 Windows 用户的本地应用目录。
 
 本地 Windows 环境可安装 Inno Setup 6.5 或以上版本，先执行 `build.bat`，再使用 Inno Setup 编译本目录的 `installer.iss`。
 

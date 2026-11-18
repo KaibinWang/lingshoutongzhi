@@ -11,11 +11,12 @@ from unittest.mock import Mock, patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QApplication, QDialog
+from PyQt5.QtWidgets import QApplication, QDialog, QPushButton, QScrollArea
 from PyQt5.QtTest import QTest
 
 from scheduled_notifier.delivery import DeliveryRunner
 from scheduled_notifier.__main__ import acquire_instance_lock
+from scheduled_notifier.group_dialog import GroupDialog
 from scheduled_notifier.runtime import Scheduler
 from scheduled_notifier.storage import Store
 from scheduled_notifier.task_dialog import TaskDialog
@@ -70,6 +71,36 @@ class UiTests(unittest.TestCase):
         self.assertEqual(window.pages.count(), 3)
         self.assertEqual(window.task_table.rowCount(), 1)
         self.assertEqual(window.group_table.rowCount(), 1)
+
+    def test_larger_font_applies_to_tables_dialogs_and_editor(self):
+        window = MainWindow(self.store, start_scheduler=False)
+        self.addCleanup(window.shutdown)
+        task = TaskDialog(self.store, parent=window)
+        group = GroupDialog(self.store, parent=window)
+        for widget in (window.task_table, window.task_table.horizontalHeader(),
+                       window.nav_buttons.button(0), task.content_edit, group.name_edit):
+            widget.ensurePolished()
+            self.assertEqual(widget.font().pixelSize(), 17, type(widget).__name__)
+        self.assertEqual(task.content_edit.document().defaultFont().pixelSize(), 17)
+        self.assertGreater(window.task_table.verticalHeader().defaultSectionSize(), 44)
+
+    def test_task_editor_keeps_save_buttons_outside_form_scroll_area(self):
+        window = MainWindow(self.store, start_scheduler=False)
+        self.addCleanup(window.shutdown)
+        dialog = TaskDialog(self.store, parent=window)
+        self.addCleanup(dialog.close)
+        dialog.mode_combo.setCurrentIndex(2)
+        dialog.resize(760, 465)
+        dialog.show()
+        self.app.processEvents()
+        form = dialog.findChild(QScrollArea)
+        self.assertIsNotNone(form)
+        self.assertTrue(form.isAncestorOf(dialog.end_edit))
+        self.assertGreater(form.verticalScrollBar().maximum(), 0)
+        save = dialog.findChild(QPushButton, "primary")
+        self.assertIsNotNone(save)
+        self.assertFalse(form.isAncestorOf(save))
+        self.assertTrue(dialog.rect().contains(save.mapTo(dialog, save.rect().bottomRight())))
 
     def test_two_instances_cannot_acquire_same_lock(self):
         lock = acquire_instance_lock(Path(self.temp.name))

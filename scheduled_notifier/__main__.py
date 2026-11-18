@@ -6,7 +6,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from PyQt5.QtCore import QLockFile, QStandardPaths, QTimer
+from PyQt5.QtCore import QLockFile, QStandardPaths, QTimer, Qt
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import QApplication, QMessageBox
 
@@ -62,11 +62,13 @@ def run_application(app, directory, smoke_test=False):
 
 def main():
     smoke_test = "--smoke-test" in sys.argv
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
+    QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication([argument for argument in sys.argv if argument != "--smoke-test"])
     app.setOrganizationName("RetailTools")
     app.setApplicationName("WeComScheduledNotifier")
     app.setApplicationDisplayName("企业微信群定时通知工具")
-    app.setFont(QFont("Microsoft YaHei", 10))
+    app.setFont(QFont("Microsoft YaHei", 13))
     app.setStyle("Fusion")
     app.setQuitOnLastWindowClosed(False)
     if smoke_test:

@@ -1,5 +1,5 @@
 #define AppName "企业微信群定时通知工具"
-#define AppVersion "1.0.0"
+#define AppVersion "1.0.1"
 #define AppExeName "WeComScheduledNotifier.exe"
 
 [Setup]

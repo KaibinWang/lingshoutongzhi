@@ -31,14 +31,15 @@ STATUS_LABELS = {
 
 STYLE = """
 QMainWindow, QDialog { background: #f5f7fa; color: #202a3b; }
-QWidget { font-family: 'Microsoft YaHei', 'PingFang SC'; font-size: 13px; }
+QWidget#taskForm { background: #f5f7fa; }
+QWidget { font-family: 'Microsoft YaHei', 'PingFang SC'; font-size: 17px; }
 QLabel { color: #202a3b; }
-QLabel#pageTitle { font-size: 22px; font-weight: 600; padding-bottom: 4px; }
+QLabel#pageTitle { font-size: 26px; font-weight: 600; padding-bottom: 4px; }
 QLabel#secondary { color: #66748a; }
 QLabel#planPreview { background: #eaf3ee; color: #24563f; padding: 12px; border-radius: 6px; }
 QWidget#sidebar { background: #1f2c40; }
-QLabel#brand { color: #ffffff; font-size: 21px; font-weight: 600; }
-QLabel#sidebarNote { color: #becbdd; font-size: 12px; }
+QLabel#brand { color: #ffffff; font-size: 24px; font-weight: 600; }
+QLabel#sidebarNote { color: #becbdd; font-size: 15px; }
 QPushButton { background: #ffffff; color: #29374d; border: 1px solid #d8dfe8;
     border-radius: 5px; padding: 8px 14px; }
 QPushButton:hover { background: #eef3f7; }
@@ -76,7 +77,7 @@ def make_table(headers):
     table.setAlternatingRowColors(True)
     table.setShowGrid(False)
     table.verticalHeader().hide()
-    table.verticalHeader().setDefaultSectionSize(44)
+    table.verticalHeader().setDefaultSectionSize(52)
     table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
     table.horizontalHeader().setStretchLastSection(True)
     return table
@@ -114,8 +115,9 @@ class MainWindow(QMainWindow):
         self.scheduler = None
         self.quitting = False
         self.setWindowTitle("企业微信群定时通知工具")
-        self.setMinimumSize(1020, 680)
-        self.resize(1200, 800)
+        self.setMinimumSize(760, 440)
+        available = self.screen().availableGeometry()
+        self.resize(min(1280, available.width()), min(820, available.height() - 48))
         self.setStyleSheet(STYLE)
         self.setWindowIcon(self.style().standardIcon(QStyle.SP_MessageBoxInformation))
         central = QWidget()
@@ -124,7 +126,7 @@ class MainWindow(QMainWindow):
         root.setSpacing(0)
         sidebar = QWidget()
         sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(180)
+        sidebar.setFixedWidth(196)
         navigation = QVBoxLayout(sidebar)
         navigation.setContentsMargins(18, 28, 18, 22)
         navigation.setSpacing(12)
@@ -148,6 +150,7 @@ class MainWindow(QMainWindow):
         navigation.addStretch()
         condition = QLabel("工具运行期间执行\n北京时间 UTC+8")
         condition.setObjectName("sidebarNote")
+        condition.setWordWrap(True)
         navigation.addWidget(condition)
         self.pages.addWidget(self.build_tasks_page())
         self.pages.addWidget(self.build_groups_page())
@@ -203,7 +206,7 @@ class MainWindow(QMainWindow):
         self.task_table.doubleClicked.connect(self.edit_task)
         layout.addWidget(self.task_table, 3)
         self.task_detail = QTextBrowser()
-        self.task_detail.setMinimumHeight(145)
+        self.task_detail.setMinimumHeight(105)
         self.task_detail.setMaximumHeight(210)
         layout.addWidget(self.task_detail, 1)
         return page

@@ -72,7 +72,7 @@ jobs:
       - name: Verify installation, launch and uninstallation
         shell: pwsh
         run: |
-          $installer = (Resolve-Path scheduled_notifier/dist/WeComScheduledNotifier-Setup-1.0.0.exe).Path
+          $installer = (Resolve-Path scheduled_notifier/dist/WeComScheduledNotifier-Setup-*.exe).Path
           $target = Join-Path $env:RUNNER_TEMP 'WeComScheduledNotifier-installed'
           $installLog = Join-Path $env:RUNNER_TEMP 'wecom-notifier-install.log'
           $arguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', "/DIR=`"$target`"", "/LOG=`"$installLog`"", '/TASKS=desktopicon')
@@ -109,7 +109,7 @@ jobs:
           name: WeComScheduledNotifier-Windows-x64
           path: |
             scheduled_notifier/dist/WeComScheduledNotifier.exe
-            scheduled_notifier/dist/WeComScheduledNotifier-Setup-1.0.0.exe
+            scheduled_notifier/dist/WeComScheduledNotifier-Setup-*.exe
             scheduled_notifier/dist/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 14

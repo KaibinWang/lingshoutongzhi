@@ -6,9 +6,9 @@ from datetime import datetime, timedelta
 
 from PyQt5.QtCore import QDate, QDateTime, QTime, Qt
 from PyQt5.QtWidgets import (
-    QCheckBox, QComboBox, QDateTimeEdit, QDialog, QFormLayout, QGridLayout,
+    QCheckBox, QComboBox, QDateTimeEdit, QDialog, QFormLayout, QFrame, QGridLayout,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
-    QPushButton, QSpinBox, QStackedWidget, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
+    QPushButton, QScrollArea, QSpinBox, QStackedWidget, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from scheduled_notifier.schedule import (
@@ -38,15 +38,22 @@ class TaskDialog(QDialog):
         self.task = task or {}
         self.saved_task_id = None
         self.setWindowTitle("编辑通知任务" if task else "新建通知任务")
-        self.setMinimumSize(880, 660)
-        self.resize(960, 740)
+        self.setMinimumSize(720, 420)
+        available = self.screen().availableGeometry()
+        self.resize(min(1040, available.width()), min(800, available.height() - 48))
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(16)
         title = QLabel(self.windowTitle())
         title.setObjectName("pageTitle")
         layout.addWidget(title)
-        columns = QHBoxLayout()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        form_content = QWidget()
+        form_content.setObjectName("taskForm")
+        columns = QHBoxLayout(form_content)
+        columns.setContentsMargins(0, 0, 8, 0)
         columns.setSpacing(24)
         left = QVBoxLayout()
         left.setSpacing(10)
@@ -156,7 +163,8 @@ class TaskDialog(QDialog):
         right.addWidget(self.plan_preview)
         right.addStretch()
         columns.addLayout(right, 1)
-        layout.addLayout(columns, 1)
+        scroll.setWidget(form_content)
+        layout.addWidget(scroll, 1)
         buttons = QHBoxLayout()
         buttons.addStretch()
         cancel = QPushButton("取消")
